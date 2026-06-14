@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/castle-destruction-game/',
+  base: '/Castle_AssaultV1/',
 });
