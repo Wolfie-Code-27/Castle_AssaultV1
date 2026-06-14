@@ -1,0 +1,19 @@
+{
+  "name": "castle-destruction-game",
+  "version": "1.0.0",
+  "description": "3D castle destruction game with realistic physics",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "vite build && npx gh-pages -d dist"
+  },
+  "dependencies": {
+    "three": "^0.164.1",
+    "cannon-es": "^0.20.0"
+  },
+  "devDependencies": {
+    "vite": "^5.2.11"
+  }
+}

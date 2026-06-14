@@ -1,0 +1,236 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Castle Destruction</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { overflow: hidden; font-family: "Segoe UI", Arial, sans-serif; background: #000; }
+        canvas { display: block; }
+
+        /* Lock overlay */
+        #lockMsg {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.78);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            z-index: 100;
+            text-align: center;
+        }
+        #lockMsg h2 { font-size: 34px; color: #f0c040; margin-bottom: 14px; letter-spacing: 3px; }
+        #lockMsg p  { font-size: 16px; margin: 5px 0; }
+        #lockMsg .hint { margin-top: 18px; font-size: 13px; color: #aaa; line-height: 2.2; }
+        .key {
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 4px;
+            padding: 1px 8px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        /* Crosshair */
+        #crosshair {
+            position: fixed;
+            top: 50%; left: 50%;
+            width: 20px; height: 20px;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        #crosshair::before, #crosshair::after {
+            content: "";
+            position: absolute;
+            background: rgba(255,255,255,0.88);
+            box-shadow: 0 0 3px rgba(0,0,0,0.9);
+        }
+        #crosshair::before { width: 20px; height: 2px; top: 9px; left: 0; }
+        #crosshair::after  { width: 2px; height: 20px; top: 0; left: 9px; }
+
+        /* Score (top-right) */
+        #scoreboard {
+            position: fixed;
+            top: 18px; right: 18px;
+            background: rgba(0,0,0,0.68);
+            color: #eee;
+            padding: 12px 18px 14px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+            min-width: 165px;
+            pointer-events: none;
+        }
+        .score-main { font-size: 22px; font-weight: bold; color: #f1c40f; }
+        .score-sub  { font-size: 12px; color: #bbb; margin-top: 4px; }
+
+        /* Controls (bottom-left) */
+        #controls {
+            position: fixed;
+            bottom: 22px; left: 22px;
+            background: rgba(0,0,0,0.72);
+            color: #eee;
+            padding: 13px 17px 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+            min-width: 185px;
+        }
+        .ctrl-row { margin: 7px 0; font-size: 13px; }
+        .ctrl-row label { display: block; margin-bottom: 3px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #e74c3c; }
+        #fireButton {
+            display: block; width: 100%;
+            margin-top: 11px; padding: 10px 0;
+            background: #e74c3c; color: #fff;
+            border: none; border-radius: 7px;
+            font-size: 14px; font-weight: bold;
+            letter-spacing: 1px; cursor: pointer;
+            transition: background 0.15s;
+        }
+        #fireButton:hover  { background: #c0392b; }
+        #fireButton:active { opacity: 0.82; }
+
+        /* Weapon selector */
+        #weaponBar {
+            position: fixed;
+            bottom: 22px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px;
+            pointer-events: none;
+        }
+        .wBtn {
+            background: rgba(0,0,0,0.72);
+            border: 2px solid rgba(255,255,255,0.18);
+            color: #ccc; font-size: 12px; font-weight: bold;
+            padding: 7px 13px; border-radius: 8px;
+            pointer-events: none; text-align: center; min-width: 80px;
+        }
+        .wBtn.active { border-color: #f1c40f; color: #f1c40f; }
+        .wBtn span { display: block; font-size: 9px; color: #888; margin-top: 2px; }
+
+        /* P2 scoreboard (top-left, hidden in 1P) */
+        #scoreboard2 {
+            position: fixed;
+            top: 18px; left: 18px;
+            background: rgba(0,0,0,0.68);
+            color: #eee;
+            padding: 12px 18px 14px;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+            min-width: 165px;
+            pointer-events: none;
+            display: none;
+        }
+        .score-main2 { font-size: 22px; font-weight: bold; color: #2ecc71; }
+
+        /* 2P toggle button */
+        #twoPlayerBtn {
+            position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.72); color: #eee;
+            border: 1px solid rgba(255,255,255,0.2); border-radius: 8px;
+            padding: 6px 16px; font-size: 13px; cursor: pointer; z-index: 10;
+        }
+        #twoPlayerBtn:hover { background: rgba(255,255,255,0.12); }
+        #splitLine {
+            position: fixed; top: 0; left: 50%; width: 2px; height: 100%;
+            background: rgba(255,255,255,0.25); display: none; pointer-events: none;
+        }
+        #p2label, #p1label {
+            position: fixed; top: 8px;
+            background: rgba(0,0,0,0.55);
+            color: #aaa; font-size: 11px; padding: 3px 10px;
+            border-radius: 5px; display: none; pointer-events: none;
+        }
+        #p1label { left: 12px; }
+        #p2label { left: calc(50% + 12px); }
+
+        /* Ammo count on weapon buttons */
+        .ammoCount {
+            display: block; font-size: 11px; color: #7fc; font-weight: normal;
+            margin-top: 2px; letter-spacing: 0;
+        }
+        .wBtn.empty { opacity: 0.38; }
+        .wBtn.empty .ammoCount { color: #f88; }
+
+        /* Game-over overlay */
+        #gameOver {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.84);
+            display: none;
+            flex-direction: column;
+            align-items: center; justify-content: center;
+            color: #fff; z-index: 200; text-align: center;
+        }
+        #gameOver h2 { font-size: 44px; color: #f1c40f; margin-bottom: 14px; letter-spacing: 4px; }
+        #gameOver #goMsg { font-size: 28px; font-weight: bold; margin-bottom: 10px; }
+        #gameOver #goScores { font-size: 16px; color: #ccc; margin-bottom: 28px; }
+        #gameOver .goBtn {
+            padding: 12px 40px; font-size: 17px; background: #e74c3c;
+            color: #fff; border: none; border-radius: 8px;
+            cursor: pointer; font-weight: bold; letter-spacing: 1px;
+        }
+        #gameOver .goBtn:hover { background: #c0392b; }
+    </style>
+</head>
+<body>
+    <div id="lockMsg">
+        <h2>Castle Destruction</h2>
+        <p>Click to capture the mouse and take aim</p>
+        <div class="hint">
+            <span class="key">W A S D</span> Move &nbsp;&nbsp;
+            <span class="key">Mouse</span> Aim &nbsp;&nbsp;
+            <span class="key">Click</span> or <span class="key">Space</span> Fire &nbsp;&nbsp;
+            <span class="key">Q / E</span> Weapon &nbsp;&nbsp;
+            <span class="key">+</span> / <span class="key">-</span> or <span class="key">Scroll</span> Power &nbsp;&nbsp;
+            <span class="key">ESC</span> Release mouse &nbsp;&nbsp;
+            <span class="key">RMB Hold</span> Ball-cam
+        </div>
+    </div>
+
+    <div id="crosshair"></div>
+
+    <!-- 2-player toggle -->
+    <button id="twoPlayerBtn">2-Player Mode: OFF</button>
+    <div id="splitLine"></div>
+    <div id="p1label">Player 1</div>
+    <div id="p2label">Player 2 — I/J/K/L + Right-click Fire</div>
+
+    <!-- Weapon bar -->
+    <div id="weaponBar">
+        <div class="wBtn active" id="wBtn0">🔫 Cannonball<span>Standard</span><span id="ammo0" class="ammoCount">×3</span></div>
+        <div class="wBtn" id="wBtn1">💥 Explosive<span>Blast radius</span><span id="ammo1" class="ammoCount">×1</span></div>
+        <div class="wBtn" id="wBtn2">🚦 Mortar<span>High arc</span><span id="ammo2" class="ammoCount">×1</span></div>
+    </div>
+
+    <!-- P2 scoreboard -->
+    <div id="scoreboard2">
+        <div class="score-main2">P2 Score: <span id="scoreValue2">0</span></div>
+        <div class="score-sub">Bricks: <span id="bricksHit2">0</span></div>
+        <div class="score-sub">Shots: <span id="shotsValue2">0</span></div>
+        <div class="score-sub">Ammo: <span id="p2ammo0">3</span>×🔫 &nbsp;<span id="p2ammo1">1</span>×💥 &nbsp;<span id="p2ammo2">1</span>×🚦</div>
+    </div>
+
+    <div id="scoreboard">
+        <div class="score-main">Score: <span id="scoreValue">0</span></div>
+        <div class="score-sub">Bricks: <span id="bricksHit">0</span> / <span id="totalBricks">0</span></div>
+        <div class="score-sub">Shots: <span id="shotsValue">0</span></div>
+    </div>
+
+    <div id="controls">
+        <div class="ctrl-row">
+            <label>Power: <span id="powerValue">30</span> m/s</label>
+            <input type="range" id="power" min="10" max="60" value="30">
+        </div>
+        <button id="fireButton">FIRE! (Space)</button>
+    </div>
+
+    <div id="gameOver">
+        <h2>⚔️ GAME OVER ⚔️</h2>
+        <div id="goMsg"></div>
+        <div id="goScores"></div>
+        <button class="goBtn" onclick="location.reload()">Play Again</button>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
