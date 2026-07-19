@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arcade — Play My Games</title>
+<meta name="description" content="A collection of browser games. Click a card to play.">
+<style>
+    :root {
+        --bg0: #070b1a;
+        --bg1: #0d1330;
+        --accent: #5eead4;
+        --accent2: #818cf8;
+        --accent3: #f472b6;
+        --card: rgba(255, 255, 255, 0.05);
+        --card-border: rgba(255, 255, 255, 0.12);
+        --text: #e8ecff;
+        --muted: #95a0c8;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body { height: 100%; }
+
+    body {
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: var(--bg0);
+        color: var(--text);
+        overflow-x: hidden;
+        min-height: 100vh;
+    }
+
+    /* Animated starfield / particle canvas sits behind everything */
+    #bgCanvas {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        display: block;
+    }
+
+    /* Soft moving aurora glow on top of the canvas */
+    .aurora {
+        position: fixed;
+        inset: -20%;
+        z-index: 0;
+        pointer-events: none;
+        background:
+            radial-gradient(40% 50% at 20% 20%, rgba(129, 140, 248, 0.25), transparent 60%),
+            radial-gradient(45% 45% at 80% 25%, rgba(94, 234, 212, 0.20), transparent 60%),
+            radial-gradient(50% 50% at 50% 90%, rgba(244, 114, 182, 0.18), transparent 60%);
+        filter: blur(20px);
+        animation: drift 22s ease-in-out infinite alternate;
+    }
+
+    @keyframes drift {
+        0%   { transform: translate3d(-3%, -2%, 0) scale(1); }
+        100% { transform: translate3d(3%, 2%, 0) scale(1.12); }
+    }
+
+    .wrap {
+        position: relative;
+        z-index: 1;
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: clamp(2rem, 6vw, 5rem) clamp(1rem, 4vw, 2.5rem) 4rem;
+    }
+
+    header {
+        text-align: center;
+        margin-bottom: clamp(2.5rem, 6vw, 4.5rem);
+    }
+
+    .badge {
+        display: inline-block;
+        font-size: 0.78rem;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--accent);
+        border: 1px solid var(--card-border);
+        background: var(--card);
+        padding: 0.45rem 1rem;
+        border-radius: 999px;
+        margin-bottom: 1.4rem;
+        backdrop-filter: blur(8px);
+    }
+
+    h1 {
+        font-size: clamp(2.4rem, 7vw, 4.6rem);
+        line-height: 1.02;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        background: linear-gradient(120deg, #fff 10%, var(--accent) 45%, var(--accent2) 75%, var(--accent3));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        background-size: 200% auto;
+        animation: shimmer 8s linear infinite;
+    }
+
+    @keyframes shimmer {
+        to { background-position: 200% center; }
+    }
+
+    header p {
+        margin-top: 1.1rem;
+        color: var(--muted);
+        font-size: clamp(1rem, 2.2vw, 1.18rem);
+        max-width: 38ch;
+        margin-left: auto;
+        margin-right: auto;
+    }
+
+    /* Card grid */
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        gap: clamp(1.2rem, 3vw, 2rem);
+    }
+
+    .card {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        text-decoration: none;
+        color: inherit;
+        background: var(--card);
+        border: 1px solid var(--card-border);
+        border-radius: 20px;
+        overflow: hidden;
+        backdrop-filter: blur(10px);
+        transition: transform 0.35s cubic-bezier(.2,.7,.2,1), box-shadow 0.35s, border-color 0.35s;
+        transform-style: preserve-3d;
+        will-change: transform;
+        animation: rise 0.7s cubic-bezier(.2,.7,.2,1) backwards;
+    }
+
+    .card:nth-child(1) { animation-delay: 0.05s; }
+    .card:nth-child(2) { animation-delay: 0.13s; }
+    .card:nth-child(3) { animation-delay: 0.21s; }
+    .card:nth-child(4) { animation-delay: 0.29s; }
+    .card:nth-child(5) { animation-delay: 0.37s; }
+    .card:nth-child(6) { animation-delay: 0.45s; }
+
+    @keyframes rise {
+        from { opacity: 0; transform: translateY(28px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .card:hover {
+        transform: translateY(-6px);
+        border-color: rgba(94, 234, 212, 0.5);
+        box-shadow:
+            0 18px 50px -12px rgba(0, 0, 0, 0.6),
+            0 0 0 1px rgba(94, 234, 212, 0.15),
+            0 0 60px -20px rgba(129, 140, 248, 0.6);
+    }
+
+    /* Glowing top accent line that animates on hover */
+    .card::before {
+        content: "";
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, var(--accent), var(--accent2), var(--accent3));
+        opacity: 0;
+        transition: opacity 0.35s;
+    }
+    .card:hover::before { opacity: 1; }
+
+    .thumb {
+        position: relative;
+        aspect-ratio: 16 / 10;
+        display: grid;
+        place-items: center;
+        font-size: 4.2rem;
+        background:
+            radial-gradient(120% 120% at 30% 20%, rgba(255,255,255,0.10), transparent 55%),
+            var(--thumb, linear-gradient(135deg, #1b2350, #0c1130));
+        overflow: hidden;
+    }
+
+    .thumb .emoji {
+        filter: drop-shadow(0 6px 18px rgba(0,0,0,0.5));
+        transform: translateZ(40px);
+        transition: transform 0.45s cubic-bezier(.2,.7,.2,1);
+    }
+    .card:hover .thumb .emoji { transform: translateZ(60px) scale(1.12) rotate(-4deg); }
+
+    /* Shine sweep across the thumbnail on hover */
+    .thumb::after {
+        content: "";
+        position: absolute;
+        top: -50%; left: -75%;
+        width: 50%; height: 200%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.25), transparent);
+        transform: rotate(20deg);
+        transition: left 0.6s ease;
+    }
+    .card:hover .thumb::after { left: 130%; }
+
+    .body {
+        padding: 1.3rem 1.4rem 1.5rem;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .body h2 {
+        font-size: 1.3rem;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .body p {
+        color: var(--muted);
+        font-size: 0.95rem;
+        line-height: 1.5;
+        flex: 1;
+    }
+
+    .tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: 0.4rem;
+    }
+
+    .tag {
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+        color: var(--accent);
+        background: rgba(94, 234, 212, 0.10);
+        border: 1px solid rgba(94, 234, 212, 0.22);
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+    }
+
+    .play {
+        margin-top: 1rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 600;
+        font-size: 0.95rem;
+        color: var(--accent);
+    }
+    .play svg { transition: transform 0.3s; }
+    .card:hover .play svg { transform: translateX(5px); }
+
+    footer {
+        position: relative;
+        z-index: 1;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.85rem;
+        padding: 2.5rem 1rem 3rem;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+        * { animation: none !important; transition: none !important; }
+    }
+</style>
+</head>
+<body>
+    <canvas id="bgCanvas"></canvas>
+    <div class="aurora"></div>
+
+    <div class="wrap">
+        <header>
+            <span class="badge">Browser Arcade</span>
+            <h1>Pick a Game.<br>Press Play.</h1>
+            <p>A hand-built collection of games that run right in your browser. No installs, just click and play.</p>
+        </header>
+
+        <main class="grid" id="grid"></main>
+    </div>
+
+    <footer>
+        Built with vanilla JavaScript &amp; WebGL · <span id="year"></span>
+    </footer>
+
+<script>
+/* ---------------------------------------------------------------------------
+   GAME LIST — add a new entry here for each game folder you upload.
+   - path:  the folder name on your host (relative link, opens that game)
+   - emoji: shown big on the card thumbnail
+   - accent: two colours for the thumbnail gradient
+--------------------------------------------------------------------------- */
+const GAMES = [
+    {
+        title: "Castle Destruction",
+        path: "castle/",
+        emoji: "🏰",
+        desc: "Lay siege to a medieval castle with cannons, mortars and a minigun. Real physics — watch the towers crumble.",
+        tags: ["Physics", "3D", "Action"],
+        accent: ["#2b3a67", "#101633"]
+    }
+];
+
+/* ---- Render the cards ---------------------------------------------------- */
+const grid = document.getElementById("grid");
+const arrow = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+
+grid.innerHTML = GAMES.map(g => `
+    <a class="card" href="${g.path}">
+        <div class="thumb" style="--thumb:linear-gradient(135deg, ${g.accent[0]}, ${g.accent[1]})">
+            <span class="emoji">${g.emoji}</span>
+        </div>
+        <div class="body">
+            <h2>${g.title}</h2>
+            <p>${g.desc}</p>
+            <div class="tags">${g.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div>
+            <span class="play">Play now ${arrow}</span>
+        </div>
+    </a>
+`).join("");
+
+document.getElementById("year").textContent = new Date().getFullYear();
+
+/* ---- 3D tilt on pointer move (per card) ---------------------------------- */
+const MAX_TILT = 8; // degrees
+document.querySelectorAll(".card").forEach(card => {
+    card.addEventListener("pointermove", e => {
+        const r = card.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width  - 0.5;
+        const py = (e.clientY - r.top)  / r.height - 0.5;
+        card.style.transform =
+            `translateY(-6px) perspective(900px) rotateY(${px * MAX_TILT}deg) rotateX(${-py * MAX_TILT}deg)`;
+    });
+    card.addEventListener("pointerleave", () => { card.style.transform = ""; });
+});
+
+/* ---- Animated particle background ---------------------------------------- */
+(function starfield() {
+    const canvas = document.getElementById("bgCanvas");
+    const ctx = canvas.getContext("2d");
+    let w, h, dpr, particles;
+
+    const COUNT = 90;          // number of floating dots
+    const LINK_DIST = 130;     // px — draw a line between dots closer than this
+
+    function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = canvas.width  = innerWidth  * dpr;
+        h = canvas.height = innerHeight * dpr;
+        canvas.style.width  = innerWidth + "px";
+        canvas.style.height = innerHeight + "px";
+    }
+
+    function seed() {
+        particles = Array.from({ length: COUNT }, () => ({
+            x: Math.random() * w,
+            y: Math.random() * h,
+            vx: (Math.random() - 0.5) * 0.25 * dpr,
+            vy: (Math.random() - 0.5) * 0.25 * dpr,
+            r: (Math.random() * 1.6 + 0.6) * dpr
+        }));
+    }
+
+    function tick() {
+        ctx.clearRect(0, 0, w, h);
+
+        for (const p of particles) {
+            p.x += p.vx; p.y += p.vy;
+            if (p.x < 0 || p.x > w) p.vx *= -1;
+            if (p.y < 0 || p.y > h) p.vy *= -1;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(160, 190, 255, 0.7)";
+            ctx.fill();
+        }
+
+        // Connect nearby particles with faint lines (constellation effect)
+        const link = LINK_DIST * dpr;
+        for (let i = 0; i < particles.length; i++) {
+            for (let j = i + 1; j < particles.length; j++) {
+                const a = particles[i], b = particles[j];
+                const dx = a.x - b.x, dy = a.y - b.y;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < link * link) {
+                    const alpha = (1 - Math.sqrt(d2) / link) * 0.35;
+                    ctx.strokeStyle = `rgba(94, 234, 212, ${alpha})`;
+                    ctx.lineWidth = dpr;
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.lineTo(b.x, b.y);
+                    ctx.stroke();
+                }
+            }
+        }
+        requestAnimationFrame(tick);
+    }
+
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    resize(); seed();
+    if (!reduce) tick(); else { /* draw one static frame */ tick.call(null); }
+    addEventListener("resize", () => { resize(); seed(); });
+})();
+</script>
+</body>
+</html>
