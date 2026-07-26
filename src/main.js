@@ -1355,7 +1355,7 @@ if (window.PointerEvent || (navigator.maxTouchPoints || 0) > 0 || ('ontouchstart
     const touchInputTarget = window;
     const isUiTouchTarget = target => {
         if (!(target instanceof Element)) return false;
-        return !!target.closest('#weaponBar, #controls, #mobileWeaponHud, #mobileWeaponRoller, #mobileFireBtn, #mobileBallCamBtn, #mobileFullscreenBtn, #settingsPanel, #settingsBtn, #twoPlayerBtn, #difficultyModal, #lockMsg, #pauseActions, #gameOver, button, input, label, .dmCard, .dmModeBtn, .pauseBtn, .goBtn');
+        return !!target.closest('#weaponBar, #controls, #mobileWeaponHud, #mobileWeaponRoller, #mobileFireBtn, #mobileInteractBtn, #mobileBallCamBtn, #mobileFullscreenBtn, #settingsPanel, #settingsBtn, #twoPlayerBtn, #difficultyModal, #lockMsg, #pauseActions, #gameOver, button, input, label, .dmCard, .dmModeBtn, .pauseBtn, .goBtn');
     };
     const isUiTouchPoint = (x, y) => isUiTouchTarget(document.elementFromPoint(x, y));
 
@@ -6274,6 +6274,219 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     // switch is pulled; the flood is driven by lerping bunkerWp.baseY.
     bunkerWp = addWaterPlane(roomCX, roomCZ, roomW - 0.4, roomD - 0.4, 'castle', B.FLOOR_Y - 0.15);
 })();
+
+// === King's Bunker: trapdoor, key pickup, interaction, descent/ascent ===
+const interactPromptEl = document.getElementById('interactPrompt');
+const mobileInteractBtn = document.getElementById('mobileInteractBtn');
+
+(function buildTrapdoor() {
+    const B = BUNKER;
+    const pivot = new THREE.Group();
+    pivot.position.set(B.SHAFT_X1, 0.12, B.TRAPDOOR_Z);   // hinge along the west edge
+    scene.add(pivot);
+    castleSceneMeshes.push(pivot);
+
+    const doorTex = woodPlankTex.clone();
+    doorTex.needsUpdate = true;
+    doorTex.repeat.set(1.4, 1.4);
+    const doorMat = new THREE.MeshStandardMaterial({ map: doorTex, roughness: 0.85, metalness: 0.0, color: 0x7a5c38 });
+    const bandMat = new THREE.MeshStandardMaterial({ color: 0x2e2a26, roughness: 0.55, metalness: 0.65 });
+    const door = new THREE.Mesh(new THREE.BoxGeometry(1.36, 0.06, 1.36), doorMat);
+    door.position.set(0.7, 0, 0);
+    door.castShadow = true;
+    pivot.add(door);
+    for (const off of [-0.42, 0.42]) {
+        const band = new THREE.Mesh(new THREE.BoxGeometry(1.30, 0.075, 0.09), bandMat);
+        band.position.set(0.7, 0.005, off);
+        pivot.add(band);
+    }
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.02, 6, 12), bandMat);
+    ring.position.set(1.18, 0.05, 0);
+    ring.rotation.x = -Math.PI / 2;
+    pivot.add(ring);
+
+    trapdoor = { pivot, state: 'locked', angle: 0 };
+})();
+
+function updateTrapdoor(dt) {
+    if (!trapdoor || trapdoor.state !== 'opening') return;
+    trapdoor.angle = Math.min(1.85, trapdoor.angle + dt * 2.4);
+    trapdoor.pivot.rotation.z = trapdoor.angle;
+    if (trapdoor.angle >= 1.84) {
+        trapdoor.state = 'open';
+        if (trapdoorBody) {
+            if (trapdoorBody.world) world.removeBody(trapdoorBody);
+            const i = bunkerColliderBodies.indexOf(trapdoorBody);
+            if (i >= 0) bunkerColliderBodies.splice(i, 1);   // suppression never re-adds it
+        }
+    }
+}
+
+// The bunker key, hidden in the hut. Spins/bobs until walked over.
+(function buildBunkerKey() {
+    const goldMat = new THREE.MeshStandardMaterial({
+        color: 0xd4af37, metalness: 0.9, roughness: 0.25, emissive: 0x332200,
+    });
+    const key = new THREE.Group();
+    const bow = new THREE.Mesh(new THREE.TorusGeometry(0.10, 0.032, 8, 16), goldMat);
+    bow.position.y = 0.14;
+    key.add(bow);
+    const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.24, 0.045), goldMat);
+    shaft.position.y = -0.02;
+    key.add(shaft);
+    const tooth1 = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.04, 0.045), goldMat);
+    tooth1.position.set(0.045, -0.10, 0);
+    key.add(tooth1);
+    const tooth2 = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.04, 0.045), goldMat);
+    tooth2.position.set(0.035, -0.05, 0);
+    key.add(tooth2);
+    key.position.set(58.5, 0.95, 33.0);   // inside the hut, off the charger's spot
+    scene.add(key);
+    castleSceneMeshes.push(key);
+    bunkerPickups.push({ mesh: key, kind: 'key', collected: false, baseY: 0.95, phase: Math.random() * Math.PI * 2 });
+})();
+
+function updateBunkerPickups(dt) {
+    const px = camera.position.x, pz = camera.position.z;
+    const tNow = performance.now() * 0.001;
+    for (const p of bunkerPickups) {
+        if (p.collected) continue;
+        p.mesh.rotation.y += dt * 2.2;
+        let y = p.baseY + Math.sin(tNow * 2.0 + p.phase) * 0.06;
+        if (p.kind === 'coin' && bunkerFlooding && bunkerWp) y = Math.max(y, bunkerWp.baseY + 0.03);
+        p.mesh.position.y = y;
+        const dx = px - p.mesh.position.x, dz = pz - p.mesh.position.z;
+        if (dx * dx + dz * dz > 1.0) continue;
+        if (p.kind === 'key' && (bunkerState.phase !== 'above' || storyCastleSuppressed)) continue;
+        if (p.kind === 'coin' && bunkerState.phase !== 'inside') continue;
+        p.collected = true;
+        p.mesh.visible = false;
+        if (p.kind === 'key') {
+            hasKey = true;
+            spawnScorePopup(p.mesh.position.x, p.mesh.position.y + 0.4, p.mesh.position.z, 'BUNKER KEY', null);
+            if (storyModeEnabled) setStoryHud('Key found — back to the courtyard trapdoor');
+        } else {
+            bunkerCoinsCollected++;
+            score += BUNKER_COIN_SCORE;
+            updateUI();
+            spawnScorePopup(p.mesh.position.x, p.mesh.position.y + 0.4, p.mesh.position.z, '+' + BUNKER_COIN_SCORE, null);
+            updateCoinHud();
+        }
+    }
+}
+
+// Context-sensitive "use" (E key / USE button). Returns the current
+// interactable, or null — E falls through to weapon-next when null.
+function getInteractContext() {
+    if (window.__editorActive || gameOver || storyCastleSuppressed) return null;
+    if (bunkerState.phase === 'descending' || bunkerState.phase === 'ascending') return { id: 'busy', text: '' };
+    if (!trapdoor) return null;
+    const px = camera.position.x, pz = camera.position.z;
+    if (bunkerState.phase === 'above') {
+        const dTrap = Math.hypot(px - BUNKER.TRAPDOOR_X, pz - BUNKER.TRAPDOOR_Z);
+        if (dTrap < 1.6) {
+            if (trapdoor.state === 'open' || trapdoor.state === 'opening') return { id: 'trapdoor-descend', text: 'Descend into the bunker' };
+            if (hasKey) return { id: 'trapdoor-unlock', text: 'Unlock the trapdoor' };
+            return { id: 'trapdoor-locked', text: 'Locked — find the key' };
+        }
+    } else if (bunkerState.phase === 'inside') {
+        const dShaft = Math.hypot(px - BUNKER.TRAPDOOR_X, pz - BUNKER.TRAPDOOR_Z);
+        if (dShaft < 1.3 && !playerWaterState) return { id: 'shaft-ascend', text: 'Climb out' };
+    }
+    return null;
+}
+
+function tryInteract() {
+    const ctx = getInteractContext();
+    if (!ctx) return false;
+    switch (ctx.id) {
+        case 'busy':
+            return true;
+        case 'trapdoor-locked':
+            flashInteractPrompt();
+            return true;
+        case 'trapdoor-unlock':
+            hasKey = false;
+            trapdoor.state = 'opening';
+            playDrawbridgeCreak(0.4, 0.3);
+            return true;
+        case 'trapdoor-descend':
+            beginBunkerTransition('down');
+            return true;
+        case 'shaft-ascend':
+            beginBunkerTransition('up');
+            return true;
+    }
+    return true;
+}
+
+function updateInteractPrompt() {
+    const ctx = getInteractContext();
+    const show = !!ctx && ctx.id !== 'busy';
+    if (interactPromptEl) {
+        if (show) {
+            interactPromptEl.style.display = 'block';
+            interactPromptEl.textContent = (touchControls.enabled ? '' : 'E — ') + ctx.text;
+        } else {
+            interactPromptEl.style.display = 'none';
+        }
+    }
+    if (mobileInteractBtn) {
+        mobileInteractBtn.style.display = (show && touchControls.enabled) ? 'block' : 'none';
+    }
+}
+
+function flashInteractPrompt() {
+    if (!interactPromptEl) return;
+    interactPromptEl.classList.remove('flash');
+    void interactPromptEl.offsetWidth;
+    interactPromptEl.classList.add('flash');
+}
+
+// Scripted camera descent/ascent through the shaft: two smoothstep segments
+// (slide over the shaft, then the vertical climb) while input is suspended.
+function beginBunkerTransition(dir) {
+    const B = BUNKER;
+    bunkerState.from.copy(camera.position);
+    bunkerState.via.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.TRAPDOOR_Z);
+    if (dir === 'down') {
+        bunkerState.to.set(B.TRAPDOOR_X, B.EYE_Y, B.TRAPDOOR_Z);
+    } else {
+        bunkerState.to.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.TRAPDOOR_Z - 1.9);   // step out north of the shaft
+    }
+    bunkerState.seg = 0;
+    bunkerState.t = 0;
+    bunkerState.phase = dir === 'down' ? 'descending' : 'ascending';
+    playerOnGround = false;
+    playerYVel = 0;
+    jumpQueued = false;
+}
+
+function updateBunkerTransition(dt) {
+    const SEG_TIMES = [0.55, 1.5];
+    bunkerState.t += dt / SEG_TIMES[bunkerState.seg];
+    const t = Math.min(1, bunkerState.t);
+    const s = t * t * (3 - 2 * t);   // smoothstep
+    const a = bunkerState.seg === 0 ? bunkerState.from : bunkerState.via;
+    const b = bunkerState.seg === 0 ? bunkerState.via : bunkerState.to;
+    camera.position.lerpVectors(a, b, s);
+    if (t >= 1) {
+        if (bunkerState.seg === 0) {
+            bunkerState.seg = 1;
+            bunkerState.t = 0;
+        } else {
+            const goingDown = bunkerState.phase === 'descending';
+            bunkerState.phase = goingDown ? 'inside' : 'above';
+            camera.position.copy(bunkerState.to);
+            playerOnGround = true;
+            playerYVel = 0;
+            if (goingDown && !bunkerEverEntered) {
+                bunkerEverEntered = true;
+                kingSwitchTimer = BUNKER_FLOOD_DELAY_SEC;
+            }
+        }
+    }
+}
 
 // === Front-facing cloth banners that hang from the battlements ===
 // Each banner hangs against the front wall, anchored to the nearest wall brick.
@@ -13086,6 +13299,10 @@ function getEditorFloorY(px, pz) {
 // bridge. Only scans bricks while inside the bridge road footprint.
 function getPlayerFloorY(px, pz) {
     if (window.__editorActive) return getEditorFloorY(px, pz);
+    // King's Bunker: the room floor is the ground while below, and the drained
+    // moat trench becomes walkable once the king pulls the switch.
+    if (bunkerState.phase !== 'above') return BUNKER.EYE_Y;
+    if (castleMoatDrained && isInCastleMoatRingXZ(px, pz, PLAYER_WATER_EDGE_BUFFER_CASTLE)) return -MOAT_DEPTH + PLAYER_BASE_Y;
     // Bridge-level only: the road footprint z-band overlaps the castle in
     // castle stage, where stepping onto wall masonry is not wanted.
     if (getActiveStoryRole() !== 'bridge') return PLAYER_BASE_Y;
@@ -15088,6 +15305,12 @@ if (mobileFireBtn) {
     mobileFireBtn.addEventListener('mouseleave', fireEnd);
 }
 const mobileDescendBtn = document.getElementById('mobileDescendBtn');
+if (mobileInteractBtn) {
+    mobileInteractBtn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        tryInteract();
+    }, { passive: false });
+}
 if (mobileDescendBtn) {
     const descStart = e => { e.preventDefault(); e.stopPropagation(); droneDescend = true; };
     const descEnd   = e => { e.preventDefault(); e.stopPropagation(); droneDescend = false; };
@@ -16090,7 +16313,7 @@ window.addEventListener("keydown", e => {
         return;
     }
     if (!window.__editorActive && e.code === "KeyQ") setWeapon(currentWeapon - 1);
-    if (!window.__editorActive && e.code === "KeyE") setWeapon(currentWeapon + 1);
+    if (!window.__editorActive && e.code === "KeyE") { if (!tryInteract()) setWeapon(currentWeapon + 1); }
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') sniperHoldBreath = true;
 });
 
@@ -17469,8 +17692,10 @@ function animate() {
 
     // WASD + touch joystick movement along the horizontal plane (ignore pitch).
     // Keys are captured by drone controls while piloting � player stands still.
-    const moveForwardInput = activeDrone ? 0 : ((keys.w ? 1 : 0) - (keys.s ? 1 : 0) + touchControls.moveForward);
-    const moveRightInput   = activeDrone ? 0 : ((keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchControls.moveRight);
+    // Scripted bunker transitions drive the camera themselves (input suspended).
+    const bunkerScripted = bunkerState.phase === 'descending' || bunkerState.phase === 'ascending';
+    const moveForwardInput = (activeDrone || bunkerScripted) ? 0 : ((keys.w ? 1 : 0) - (keys.s ? 1 : 0) + touchControls.moveForward);
+    const moveRightInput   = (activeDrone || bunkerScripted) ? 0 : ((keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchControls.moveRight);
     const waterDrag = playerWaterState ? 0.26 : 1.0;
     if (Math.abs(moveForwardInput) > 0.001 || Math.abs(moveRightInput) > 0.001) {
         const fwd   = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
@@ -17484,7 +17709,7 @@ function animate() {
         }
     }
 
-    if (!playerWaterState && !gameOver) {
+    if (!playerWaterState && !gameOver && !bunkerScripted) {
         // Standing on bridge masonry above the waterline must not dunk the
         // player � the water test is 2D, so gate it on feet near ground level.
         const touchingWater = isPlayerInMoatWaterXZ(camera.position.x, camera.position.z)
@@ -17499,7 +17724,7 @@ function animate() {
     if (playerWaterState) {
         jumpQueued = false;
         updatePlayerWaterFall(dt);
-    } else {
+    } else if (!bunkerScripted) {
         // Space jump for P1 (works even while standing still).
         if (jumpQueued) {
             if (playerOnGround) {
@@ -17531,6 +17756,15 @@ function animate() {
                 camera.position.y = floorY;
             }
         }
+    }
+
+    // Inside the bunker the camera is the player's whole body: keep it inside
+    // the room (the game's cameras have no wall collision anywhere else) and
+    // below the ceiling while jumping.
+    if (bunkerState.phase === 'inside') {
+        camera.position.x = THREE.MathUtils.clamp(camera.position.x, BUNKER.X1 + 0.4, BUNKER.X2 - 0.4);
+        camera.position.z = THREE.MathUtils.clamp(camera.position.z, BUNKER.Z1 + 0.4, BUNKER.Z2 - 0.4);
+        if (camera.position.y > BUNKER.CEIL_Y - 0.08) camera.position.y = BUNKER.CEIL_Y - 0.08;
     }
 
     // P2 IJKL movement

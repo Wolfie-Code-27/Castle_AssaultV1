@@ -589,6 +589,47 @@
             touch-action: none;
             margin-top: 4px;
         }
+        #mobileInteractBtn {
+            width: clamp(58px, 15vw, 68px);
+            height: clamp(58px, 15vw, 68px);
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.42);
+            background: radial-gradient(circle at 32% 30%, #ffd27b, #a86a08 72%);
+            color: #fff;
+            font-size: 14px;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            box-shadow: 0 10px 22px rgba(0,0,0,0.42), inset 0 2px 6px rgba(255,255,255,0.26);
+            pointer-events: auto;
+            touch-action: none;
+            margin-top: 4px;
+        }
+        #interactPrompt {
+            display: none;
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 8px 20px;
+            border-radius: 999px;
+            font-family: Georgia, 'Times New Roman', serif;
+            font-size: 16px;
+            letter-spacing: 0.04em;
+            color: #f4e8bb;
+            background: rgba(24, 18, 8, 0.85);
+            border: 1px solid rgba(244, 232, 187, 0.45);
+            box-shadow: 0 4px 18px rgba(0,0,0,0.5);
+            pointer-events: none;
+            z-index: 121;
+            white-space: nowrap;
+        }
+        #interactPrompt.flash {
+            animation: interactFlash 0.28s ease-in-out 2;
+        }
+        @keyframes interactFlash {
+            0%, 100% { transform: translateX(-50%) scale(1); }
+            50% { transform: translateX(-50%) scale(1.12); border-color: #ffd27b; }
+        }
         #mobileWeaponAssembly {
             display: flex;
             align-items: center;
@@ -1461,7 +1502,7 @@
 
             <div class="dmFootNote">
                 <span class="key">W A S D</span> Move &nbsp; <span class="key">Mouse</span> Aim &nbsp;
-                <span class="key">Click / Space</span> Fire &nbsp; <span class="key">Q / E</span> Weapon &nbsp;
+                <span class="key">Click / Space</span> Fire &nbsp; <span class="key">Q / E</span> Weapon &nbsp; <span class="key">E</span> Use &nbsp;
                 <span class="key">ESC</span> Pause
             </div>
 
@@ -1477,7 +1518,7 @@
             <span class="key">Mouse</span> Aim &nbsp;&nbsp;
             <span class="key">Click</span> Fire &nbsp;&nbsp;
             <span class="key">Space</span> Jump &nbsp;&nbsp;
-            <span class="key">Q / E</span> Weapon &nbsp;&nbsp;
+            <span class="key">Q / E</span> Weapon &nbsp;&nbsp;<span class="key">E</span> Use &nbsp;&nbsp;
             <span class="key">+</span> / <span class="key">-</span> or <span class="key">Scroll</span> Power &nbsp;&nbsp;
             <span class="key">ESC</span> Pause &nbsp;&nbsp;
             <span class="key">RMB Hold</span> Ball-cam
@@ -1520,6 +1561,7 @@
     </div>
     <div id="hitMarker"><i class="t"></i><i class="b"></i><i class="l"></i><i class="r"></i></div>
     <div id="popups"></div>
+    <div id="interactPrompt"></div>
     <div id="hitOverlay"></div>
     <div id="damageDir"><i class="up">▲</i><i class="right">▶</i><i class="down">▼</i><i class="left">◀</i></div>
     <div id="pauseMsg">
@@ -1660,6 +1702,7 @@
         </div>
         <div id="mobileFireWrap">
             <button id="mobileDescendBtn" style="display:none">DESC</button>
+            <button id="mobileInteractBtn" style="display:none">USE</button>
             <button id="mobileFireBtn">FIRE</button>
         </div>
     </div>
