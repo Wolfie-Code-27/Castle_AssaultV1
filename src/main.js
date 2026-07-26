@@ -1753,7 +1753,7 @@ function fireCannonballP2(power) {
                 hit = true;
                 if (e.body && e.body.mass > 0) {
                     const spd = Math.sqrt(body.velocity.x * body.velocity.x + body.velocity.y * body.velocity.y + body.velocity.z * body.velocity.z) || 1;
-                    const nudge = hitIsPlank ? 9 : 18;
+                    const nudge = hitIsPlank ? 9 : 28;
                     e.body.wakeUp();
                     e.body.applyImpulse(
                         new CANNON.Vec3(
@@ -1852,21 +1852,23 @@ function fireCannonballP2(power) {
                 }
                 if (!wakeDone) {
                     const hitRole = e.body?._storyRole || null;
-                    const R = hitRole === 'bridge'
-                        ? (isMobileProfile ? 0.95 : 1.05)
+                    const isBridgeHit = hitRole === 'bridge';
+                    // Bridge masonry is long and precarious: keep wakes tiny and
+                    // spherical so one shot only disturbs the immediate bay.
+                    const R = isBridgeHit
+                        ? (isMobileProfile ? 0.72 : 0.82)
                         : (isMobileProfile ? 1.35 : 1.7);
-                    const wakeLimit = hitRole === 'bridge' ? 18 : 34;
+                    const R2 = R * R;
+                    const wakeLimit = isBridgeHit ? 8 : 34;
                     let woke = 0;
                     const ix = body.position.x, iy = body.position.y, iz = body.position.z;
                     for (const b of bricks) {
                         if (isBrickInInactiveStoryLevel(b)) continue;
                         if (hitRole && b.storyRole !== hitRole) continue;
                         const dx = b.body.position.x - ix;
-                        if (dx > R || dx < -R) continue;
-                        const dz = b.body.position.z - iz;
-                        if (dz > R || dz < -R) continue;
                         const dy = b.body.position.y - iy;
-                        if (dy > R || dy < -R) continue;
+                        const dz = b.body.position.z - iz;
+                        if (dx * dx + dy * dy + dz * dz > R2) continue;
                         if (b.body.sleepState !== 0) {
                             b.body.wakeUp();
                             woke++;
@@ -2630,6 +2632,28 @@ if (DEV_HIDE_ALL_GRASS) {
     grassMat.visible = false;
 }
 
+// Flat green used in Bridge-2 dev mode so z-fighting shows as a clean colour
+// shift rather than exploding texture noise, making it easier to diagnose.
+const grassFlatMat = new THREE.MeshStandardMaterial({
+    color: 0x4a8c2a,
+    roughness: 0.9,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+});
+
+function _applyGroundMaterial(mat) {
+    scene.traverse(obj => {
+        if (obj.isMesh && (
+            obj.name === 'baseGrass' ||
+            obj.name === 'bridgeGroundPatch' ||
+            obj.name === 'groundSeamUnderlay' ||
+            obj.userData?.bridge2GroundPatch
+        )) {
+            obj.material = mat;
+        }
+    });
+}
+
 // === Procedural snow ground texture ===
 function makeSnowTexture() {
     const W = 512, H = 512;
@@ -2713,6 +2737,8 @@ function makeSnowTexture() {
 const snowGroundMap = makeSnowTexture();
 let grassTuftsMesh = null;
 let grassTuftCountMax = 0;
+let grassOriginalMatrices = null;  // backup for trench-culling
+const baseGroundMeshes = [];
 const castleSceneMeshes = [];
 const castleMoatPhysicsBodies = [];
 let castleIslandGroundBody = null;
@@ -2725,6 +2751,7 @@ let bridgeCenterExtGroundBodyBack = null;
 const castleBridgeBandCoverBodies = [];
 let templateGroundOverrideMesh = null;
 let templateGroundOverrideBody = null;
+const templateGroundCarvedBodies = [];
 
 function setGrassQualityForDifficulty(diffKey) {
     if (!grassTuftsMesh || grassTuftCountMax <= 0) return;
@@ -2742,10 +2769,12 @@ function setGrassQualityForDifficulty(diffKey) {
 function addGround(cx, cz, w, d, levelRole = 'shared') {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), grassMat);
     m.name = 'baseGrass';
+    m.userData.levelRole = levelRole;
     m.rotation.x = -Math.PI / 2;
     m.position.set(cx, 0, cz);
     m.receiveShadow = true;
     scene.add(m);
+    baseGroundMeshes.push(m);
     if (levelRole === 'castle') castleSceneMeshes.push(m);
 }
 // 1-4. Ground strips around the moat rect � carved around the WIDER bridge
@@ -2787,10 +2816,12 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
     const seam = (cx, cz, w, d, levelRole = 'shared') => {
         const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), grassMat);
         m.name = 'groundSeamUnderlay';
+        m.userData.levelRole = levelRole;
         m.rotation.x = -Math.PI / 2;
         m.position.set(cx, -0.01, cz);
         m.receiveShadow = true;
         scene.add(m);
+        baseGroundMeshes.push(m);
         if (levelRole === 'castle') castleSceneMeshes.push(m);
     };
     const SW = 0.8; // seam cover width
@@ -2901,10 +2932,92 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
 function setTemplateGroundOverrideActive(active) {
     const on = !!active;
     if (templateGroundOverrideMesh) templateGroundOverrideMesh.visible = on;
-    if (!templateGroundOverrideBody) return;
-    const hasBody = world?.bodies?.includes(templateGroundOverrideBody);
-    if (on && !hasBody) world.addBody(templateGroundOverrideBody);
-    if (!on && hasBody) world.removeBody(templateGroundOverrideBody);
+    for (const mesh of baseGroundMeshes) {
+        mesh.visible = on
+            ? false
+            : (mesh.userData.levelRole !== 'castle' || !storyCastleSuppressed);
+    }
+    rebuildTemplateGroundCarving(on);
+}
+
+function rebuildTemplateGroundCarving(forceActive = null) {
+    if (!templateGroundOverrideMesh || !templateGroundOverrideBody) return;
+    const active = forceActive == null ? templateGroundOverrideMesh.visible : !!forceActive;
+    const baseIsAdded = world?.bodies?.includes(templateGroundOverrideBody);
+    if (baseIsAdded) world.removeBody(templateGroundOverrideBody);
+    while (templateGroundCarvedBodies.length) {
+        const body = templateGroundCarvedBodies.pop();
+        if (world?.bodies?.includes(body)) world.removeBody(body);
+    }
+
+    const cuts = editorTrenchEntries.map(e => ({
+        minX: Math.max(-500, e.minX), maxX: Math.min(500, e.maxX),
+        minZ: Math.max(-500, e.minZ), maxZ: Math.min(500, e.maxZ),
+    })).filter(e => e.maxX > e.minX && e.maxZ > e.minZ);
+
+    if (!cuts.length) {
+        const oldGeometry = templateGroundOverrideMesh.geometry;
+        templateGroundOverrideMesh.geometry = new THREE.PlaneGeometry(1000, 1000);
+        templateGroundOverrideMesh.rotation.set(-Math.PI / 2, 0, 0);
+        templateGroundOverrideMesh.position.set(0, 0.032, 0);
+        oldGeometry?.dispose();
+        if (active) world.addBody(templateGroundOverrideBody);
+        return;
+    }
+
+    const zEdges = [-500, 500];
+    for (const cut of cuts) zEdges.push(cut.minZ, cut.maxZ);
+    zEdges.sort((a, b) => a - b);
+    const uniqueZ = zEdges.filter((value, index) => index === 0 || Math.abs(value - zEdges[index - 1]) > 0.001);
+    const rects = [];
+    for (let zi = 0; zi < uniqueZ.length - 1; zi++) {
+        const z1 = uniqueZ[zi], z2 = uniqueZ[zi + 1];
+        if (z2 - z1 < 0.001) continue;
+        const intervals = cuts
+            .filter(cut => cut.minZ < z2 - 0.001 && cut.maxZ > z1 + 0.001)
+            .map(cut => [cut.minX, cut.maxX])
+            .sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const interval of intervals) {
+            const tail = merged[merged.length - 1];
+            if (tail && interval[0] <= tail[1] + 0.001) tail[1] = Math.max(tail[1], interval[1]);
+            else merged.push(interval.slice());
+        }
+        let x = -500;
+        for (const interval of merged) {
+            if (interval[0] > x + 0.001) rects.push({ x1: x, x2: interval[0], z1, z2 });
+            x = Math.max(x, interval[1]);
+        }
+        if (x < 500 - 0.001) rects.push({ x1: x, x2: 500, z1, z2 });
+    }
+
+    const positions = [], normals = [], uvs = [], indices = [];
+    for (const rect of rects) {
+        const base = positions.length / 3;
+        positions.push(rect.x1, 0.032, rect.z1, rect.x1, 0.032, rect.z2,
+            rect.x2, 0.032, rect.z2, rect.x2, 0.032, rect.z1);
+        normals.push(0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0);
+        uvs.push(rect.x1 * 0.02, rect.z1 * 0.02, rect.x1 * 0.02, rect.z2 * 0.02,
+            rect.x2 * 0.02, rect.z2 * 0.02, rect.x2 * 0.02, rect.z1 * 0.02);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+
+        const width = rect.x2 - rect.x1, depth = rect.z2 - rect.z1;
+        const body = new CANNON.Body({ mass: 0, material: brickPhysMat });
+        body.addShape(new CANNON.Box(new CANNON.Vec3(width * 0.5, 0.25, depth * 0.5)));
+        body.position.set((rect.x1 + rect.x2) * 0.5, -0.25, (rect.z1 + rect.z2) * 0.5);
+        templateGroundCarvedBodies.push(body);
+        if (active) world.addBody(body);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    const oldGeometry = templateGroundOverrideMesh.geometry;
+    templateGroundOverrideMesh.geometry = geometry;
+    templateGroundOverrideMesh.rotation.set(0, 0, 0);
+    templateGroundOverrideMesh.position.set(0, 0, 0);
+    oldGeometry?.dispose();
 }
 
 // === Rolling hills on the horizon (scenery only, no physics) ===
@@ -4032,65 +4145,202 @@ const waterImpactRipples = [];
 const storyWaterCapMaterials = [];
 const storyWaterCapMeshes = [];
 const editorTrenchEntries = [];
+let editorTrenchWaterSurface = null;
+let editorTrenchBoundaryMesh = null;
+let editorTrenchBoundaryMaterial = null;
 let waterImpactRippleCursor = 0;
 
-function createEditorTrench(x, z, length = 8, width = 3, depth = 1.4) {
-    const L = Math.max(2.0, Math.abs(length) || 8.0);
-    const W = Math.max(1.4, Math.abs(width) || 3.0);
-    const D = Math.max(0.45, Math.abs(depth) || 1.4);
-    const R = Math.max(0.9, Math.min(L, W) * 0.5 - 0.05);
+function createEditorTrench(x, z, length = 0.5, width = 0.5, _depth = 0.7, withWater = false) {
+    const L = Math.max(0.5, Math.min(3.0, Math.abs(length) || 0.5));
+    const W = Math.max(0.5, Math.min(3.0, Math.abs(width) || 0.5));
+    const D = 0.7;
+    const waterY = withWater ? -D * 0.58 : null;
 
     const g = new THREE.Group();
     g.position.set(x, 0, z);
 
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0x8a7c65, roughness: 0.98, metalness: 0.0 });
-    const innerMat = new THREE.MeshStandardMaterial({ color: 0x5f5649, roughness: 1.0, metalness: 0.0 });
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x726658, roughness: 0.98, metalness: 0.0 });
+    const floorMat = new THREE.MeshStandardMaterial({
+        map: makeMudTexture(), bumpMap: stoneBumpMap, bumpScale: 0.012,
+        color: 0x503921, roughness: 1.0, metalness: 0.0,
+    });
 
-    // Rounded stamp reads as a hand-drawn trench brush dab.
-    const rim = new THREE.Mesh(new THREE.CylinderGeometry(R + 0.12, R + 0.16, 0.05, 20), rimMat);
-    rim.position.y = 0.025;
-    rim.receiveShadow = true;
-    g.add(rim);
+    // ── Pit floor ──────────────────────────────────────────────────────────
+    const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(L, W), floorMat);
+    floorMesh.rotation.x = -Math.PI / 2;
+    floorMesh.position.y = -D + 0.01;
+    floorMesh.receiveShadow = true;
+    g.add(floorMesh);
 
-    const innerR = Math.max(0.65, R - 0.12);
-    const opening = new THREE.Mesh(new THREE.CylinderGeometry(innerR, innerR, 0.045, 20), innerMat);
-    opening.position.y = 0.018;
-    g.add(opening);
-
-    const floor = new THREE.Mesh(new THREE.CylinderGeometry(innerR - 0.05, innerR - 0.05, 0.08, 18), wallMat);
-    floor.position.y = -D + 0.04;
-    floor.receiveShadow = true;
-    g.add(floor);
-
-    const wall = new THREE.Mesh(new THREE.CylinderGeometry(innerR, innerR + 0.03, D, 20, 1, true), wallMat);
-    wall.position.y = -D * 0.5;
-    wall.receiveShadow = true;
-    g.add(wall);
-
-    const waterY = -Math.max(0.12, D * 0.42);
-
-    // Reuse the global animated water path so toggles and Play mode behave consistently.
-    const waterPlane = addWaterPlane(x, z, (innerR * 2) - 0.1, (innerR * 2) - 0.1, 'editor', waterY);
+    // ── Water (optional) — near-surface so the moat is visible from above ──
+    // ── Physics floor ──────────────────────────────────────────────────────
+    const floorBody = new CANNON.Body({ mass: 0, material: brickPhysMat });
+    floorBody.addShape(new CANNON.Box(new CANNON.Vec3(L * 0.5 + 0.1, 0.15, W * 0.5 + 0.1)));
+    floorBody.position.set(x, -D - 0.15, z);
+    world.addBody(floorBody);
 
     scene.add(g);
     const entry = {
         group: g,
-        x,
-        z,
+        floorBody,
+        x, z,
         length: L,
         width: W,
-        radius: innerR,
         depth: D,
         waterY,
-        waterPlane,
-        minX: x - innerR,
-        maxX: x + innerR,
-        minZ: z - innerR,
-        maxZ: z + innerR,
+        waterPlane: null,
+        minX: x - L * 0.5,
+        maxX: x + L * 0.5,
+        minZ: z - W * 0.5,
+        maxZ: z + W * 0.5,
     };
     editorTrenchEntries.push(entry);
+    updateEditorTrenchWalls();
+    rebuildEditorTrenchWaterSurface();
+    rebuildTemplateGroundCarving();
+    updateGrassTrenchCull();
     return entry;
+}
+
+function buildEditorTrenchWaterGeometry(entries) {
+    const zEdges = [];
+    for (const entry of entries) zEdges.push(entry.minZ, entry.maxZ);
+    zEdges.sort((a, b) => a - b);
+    const uniqueZ = zEdges.filter((value, index) => index === 0 || Math.abs(value - zEdges[index - 1]) > 0.001);
+    const positions = [], indices = [];
+    for (let zi = 0; zi < uniqueZ.length - 1; zi++) {
+        const z1 = uniqueZ[zi], z2 = uniqueZ[zi + 1];
+        const intervals = entries
+            .filter(entry => entry.minZ < z2 - 0.001 && entry.maxZ > z1 + 0.001)
+            .map(entry => [entry.minX, entry.maxX])
+            .sort((a, b) => a[0] - b[0]);
+        const merged = [];
+        for (const interval of intervals) {
+            const tail = merged[merged.length - 1];
+            if (tail && interval[0] <= tail[1] + 0.001) tail[1] = Math.max(tail[1], interval[1]);
+            else merged.push(interval.slice());
+        }
+        for (const [x1, x2] of merged) {
+            const base = positions.length / 3;
+            positions.push(x1, -z1, 0, x2, -z1, 0, x2, -z2, 0, x1, -z2, 0);
+            indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    const bounds = geometry.boundingBox;
+    const spanX = Math.max(0.001, bounds.max.x - bounds.min.x);
+    const spanY = Math.max(0.001, bounds.max.y - bounds.min.y);
+    const uvs = new Float32Array((positions.length / 3) * 2);
+    for (let i = 0; i < positions.length / 3; i++) {
+        uvs[i * 2] = (positions[i * 3] - bounds.min.x) / spanX;
+        uvs[i * 2 + 1] = (positions[i * 3 + 1] - bounds.min.y) / spanY;
+    }
+    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    return geometry;
+}
+
+function rebuildEditorTrenchWaterSurface() {
+    const wetEntries = editorTrenchEntries.filter(entry => entry.waterY != null);
+    if (!wetEntries.length) {
+        if (editorTrenchWaterSurface) editorTrenchWaterSurface.visible = false;
+        return;
+    }
+    const geometry = buildEditorTrenchWaterGeometry(wetEntries);
+    if (!editorTrenchWaterSurface) {
+        const bucket = [];
+        editorTrenchWaterSurface = addStoryBridgeVisualWaterCap(
+            geometry, -0.7 * 0.58, 0, 0, bucket, 'editor', false
+        );
+        geometry.dispose();
+    } else {
+        const oldGeometry = editorTrenchWaterSurface.geometry;
+        editorTrenchWaterSurface.geometry = geometry;
+        oldGeometry?.dispose();
+        editorTrenchWaterSurface.visible = devWaterFxEnabled;
+    }
+}
+
+function setEditorTrenchWater(entry, enabled) {
+    if (!entry || !editorTrenchEntries.includes(entry)) return;
+    entry.waterY = enabled ? -0.7 * 0.58 : null;
+    rebuildEditorTrenchWaterSurface();
+}
+
+function setAllEditorTrenchWater(enabled) {
+    const waterY = enabled ? -0.7 * 0.58 : null;
+    for (const entry of editorTrenchEntries) entry.waterY = waterY;
+    rebuildEditorTrenchWaterSurface();
+}
+
+function updateEditorTrenchWalls() {
+    if (!editorTrenchEntries.length) {
+        if (editorTrenchBoundaryMesh) editorTrenchBoundaryMesh.visible = false;
+        return;
+    }
+
+    const uniqueSorted = values => values.sort((a, b) => a - b)
+        .filter((value, index, array) => index === 0 || Math.abs(value - array[index - 1]) > 0.001);
+    const xEdges = uniqueSorted(editorTrenchEntries.flatMap(entry => [entry.minX, entry.maxX]));
+    const zEdges = uniqueSorted(editorTrenchEntries.flatMap(entry => [entry.minZ, entry.maxZ]));
+    const occupied = new Set();
+    for (let xi = 0; xi < xEdges.length - 1; xi++) {
+        const x = (xEdges[xi] + xEdges[xi + 1]) * 0.5;
+        for (let zi = 0; zi < zEdges.length - 1; zi++) {
+            const z = (zEdges[zi] + zEdges[zi + 1]) * 0.5;
+            if (editorTrenchEntries.some(entry => x > entry.minX && x < entry.maxX
+                && z > entry.minZ && z < entry.maxZ)) occupied.add(`${xi}:${zi}`);
+        }
+    }
+
+    const positions = [], uvs = [], indices = [];
+    const addWallQuad = (a, b, c, d, span) => {
+        const base = positions.length / 3;
+        positions.push(...a, ...b, ...c, ...d);
+        uvs.push(0, 0, span, 0, span, 0.7, 0, 0.7);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    };
+    const top = 0.035, bottom = -0.71;
+    for (let xi = 0; xi < xEdges.length - 1; xi++) {
+        const x1 = xEdges[xi], x2 = xEdges[xi + 1];
+        for (let zi = 0; zi < zEdges.length - 1; zi++) {
+            if (!occupied.has(`${xi}:${zi}`)) continue;
+            const z1 = zEdges[zi], z2 = zEdges[zi + 1];
+            if (!occupied.has(`${xi - 1}:${zi}`))
+                addWallQuad([x1, top, z1], [x1, top, z2], [x1, bottom, z2], [x1, bottom, z1], z2 - z1);
+            if (!occupied.has(`${xi + 1}:${zi}`))
+                addWallQuad([x2, top, z2], [x2, top, z1], [x2, bottom, z1], [x2, bottom, z2], z2 - z1);
+            if (!occupied.has(`${xi}:${zi - 1}`))
+                addWallQuad([x2, top, z1], [x1, top, z1], [x1, bottom, z1], [x2, bottom, z1], x2 - x1);
+            if (!occupied.has(`${xi}:${zi + 1}`))
+                addWallQuad([x1, top, z2], [x2, top, z2], [x2, bottom, z2], [x1, bottom, z2], x2 - x1);
+        }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    if (!editorTrenchBoundaryMesh) {
+        editorTrenchBoundaryMaterial = new THREE.MeshStandardMaterial({
+            map: makeMudTexture(), bumpMap: stoneBumpMap, bumpScale: 0.02,
+            color: 0x684c2f, roughness: 0.98, metalness: 0.0,
+            side: THREE.DoubleSide,
+        });
+        editorTrenchBoundaryMesh = new THREE.Mesh(geometry, editorTrenchBoundaryMaterial);
+        editorTrenchBoundaryMesh.name = 'editorTrenchBoundary';
+        editorTrenchBoundaryMesh.castShadow = true;
+        editorTrenchBoundaryMesh.receiveShadow = true;
+        scene.add(editorTrenchBoundaryMesh);
+    } else {
+        const oldGeometry = editorTrenchBoundaryMesh.geometry;
+        editorTrenchBoundaryMesh.geometry = geometry;
+        oldGeometry?.dispose();
+        editorTrenchBoundaryMesh.visible = true;
+    }
 }
 
 function removeEditorTrench(entry) {
@@ -4103,7 +4353,12 @@ function removeEditorTrench(entry) {
         if (entry.waterPlane.underlay) scene.remove(entry.waterPlane.underlay);
         if (entry.waterPlane.ripple) scene.remove(entry.waterPlane.ripple);
     }
+    if (entry.floorBody) world.removeBody(entry.floorBody);
     if (entry.group) scene.remove(entry.group);
+    updateEditorTrenchWalls();
+    rebuildEditorTrenchWaterSurface();
+    rebuildTemplateGroundCarving();
+    updateGrassTrenchCull();
 }
 
 function clearEditorTrenches() {
@@ -4115,8 +4370,47 @@ function clearEditorTrenches() {
             if (e.waterPlane.underlay) scene.remove(e.waterPlane.underlay);
             if (e.waterPlane.ripple) scene.remove(e.waterPlane.ripple);
         }
+        if (e?.floorBody) world.removeBody(e.floorBody);
         if (e?.group) scene.remove(e.group);
     }
+    updateEditorTrenchWalls();
+    rebuildEditorTrenchWaterSurface();
+    rebuildTemplateGroundCarving();
+    updateGrassTrenchCull();
+}
+
+// Cull grass-tuft instances that fall inside any placed editor trench.
+// Called after any trench add / remove so the instancedMesh stays in sync.
+function updateGrassTrenchCull() {
+    if (!grassTuftsMesh || grassTuftsMesh.count <= 0) return;
+    // Lazily snapshot the original matrices once (before any culling).
+    if (!grassOriginalMatrices) {
+        grassOriginalMatrices = new Float32Array(grassTuftsMesh.instanceMatrix.array);
+    }
+    const m4  = new THREE.Matrix4();
+    const pos = new THREE.Vector3();
+    const q4  = new THREE.Quaternion();
+    const sc  = new THREE.Vector3();
+    const d2  = new THREE.Object3D();
+    for (let i = 0; i < grassTuftsMesh.count; i++) {
+        m4.fromArray(grassOriginalMatrices, i * 16);
+        m4.decompose(pos, q4, sc);
+        let hidden = false;
+        for (const e of editorTrenchEntries) {
+            if (pos.x >= e.minX && pos.x <= e.maxX &&
+                pos.z >= e.minZ && pos.z <= e.maxZ) {
+                hidden = true; break;
+            }
+        }
+        if (hidden) {
+            d2.position.copy(pos); d2.quaternion.copy(q4); d2.scale.set(0, 0, 0);
+            d2.updateMatrix();
+            grassTuftsMesh.setMatrixAt(i, d2.matrix);
+        } else {
+            grassTuftsMesh.setMatrixAt(i, m4);
+        }
+    }
+    grassTuftsMesh.instanceMatrix.needsUpdate = true;
 }
 
 // === Editor Decor � shrubs, trees, wood planks, banners ===
@@ -4306,7 +4600,7 @@ function setDevWaterFxEnabled(enabled) {
         if (!wm) continue;
         const role = wm.userData?.waterRole || 'bridge';
         const forceHiddenByBridge2 = bridge2ModeActive && role === 'bridge';
-        const levelSuppressed = role === 'castle' ? storyCastleSuppressed : storyBridgeSuppressed;
+        const levelSuppressed = isLevelRoleSuppressed(role);
         wm.visible = devWaterFxEnabled && !levelSuppressed && !forceHiddenByBridge2;
     }
 
@@ -4314,7 +4608,7 @@ function setDevWaterFxEnabled(enabled) {
         if (!cap) continue;
         const role = cap.userData?.waterRole || 'bridge';
         const forceHiddenByBridge2 = bridge2ModeActive && role === 'bridge';
-        const levelSuppressed = role === 'castle' ? storyCastleSuppressed : storyBridgeSuppressed;
+        const levelSuppressed = isLevelRoleSuppressed(role);
         cap.visible = devWaterFxEnabled && !levelSuppressed && !forceHiddenByBridge2;
     }
 
@@ -5172,6 +5466,37 @@ function createBrickSlab(x, y, z) {
     world.addBody(body);
     body.sleep();
     bricks.push({ idx, isSlab: true, body, ix: x, iy: y, iz: z, scored: false, grp: CGROUP_BRICK, storyRole: 'castle' });
+}
+
+// Half-height slab rotated across Z: a 1.0 x 0.5 x 2.0 tread used by the
+// bridge approaches so each metre of run rises by only half a metre.
+function createBrickSlabZ(x, y, z) {
+    const idx = brickInstH.count++;
+    const quat = new CANNON.Quaternion();
+    quat.setFromEuler(0, Math.PI * 0.5, 0);
+    _iDummy.position.set(x, y, z);
+    _iDummy.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+    _iDummy.updateMatrix();
+    brickInstH.setMatrixAt(idx, _iDummy.matrix);
+    brickInstH.instanceMatrix.needsUpdate = true;
+    const body = new CANNON.Body({
+        mass: 60,
+        material: wallPhysMat,
+        shape: new CANNON.Box(new CANNON.Vec3(WALL_BRICK_HALF_LEN, BS.h * 0.25, BS.d / 2)),
+        allowSleep: true,
+        sleepSpeedLimit: 0.6,
+        sleepTimeLimit:  0.3,
+        linearDamping:   0.30,
+        angularDamping:  0.55,
+        collisionFilterGroup: CGROUP_BRICK,
+        collisionFilterMask:  WALL_MASK
+    });
+    body.position.set(x, y, z);
+    body.quaternion.copy(quat);
+    body._storyRole = 'castle';
+    world.addBody(body);
+    body.sleep();
+    bricks.push({ idx, isSlab: true, isZ: true, body, ix: x, iy: y, iz: z, scored: false, grp: CGROUP_BRICK, storyRole: 'castle' });
 }
 
 // Angled wedge brick � one voussoir of a tower ring. Placed at the ring
@@ -6204,10 +6529,10 @@ const STORY_BRIDGE_WATER_HALF_Z = BRIDGE_WATER_HALF_Z;
 const STORY_BRIDGE_WATER_VISUAL_HALF_Z = BRIDGE_WATER_VISUAL_HALF_Z;
 const STORY_BRIDGE_WATER_Y = WATER_Y;
 const STORY_BRIDGE_DECK_Y = 4.2;
-const STORY_BRIDGE_RAMP_LEN = 10;
+const STORY_BRIDGE_RAMP_LEN = 12;
 const STORY_BRIDGE_DECK_HALF = 12;
 const STORY_BRIDGE_RAMP_START_OFFSET = 12.0;
-const STORY_BRIDGE_RAMP_OUTER_X = STORY_BRIDGE_DECK_HALF + STORY_BRIDGE_RAMP_START_OFFSET + STORY_BRIDGE_RAMP_LEN - 0.5;
+const STORY_BRIDGE_RAMP_OUTER_X = STORY_BRIDGE_DECK_HALF + STORY_BRIDGE_RAMP_START_OFFSET + STORY_BRIDGE_RAMP_LEN;
 const STORY_BRIDGE_APPROACH_X = STORY_BRIDGE_RAMP_OUTER_X + 0.9;
 const STORY_BRIDGE_ROAD_HALF_Z = 3.35;
 const STORY_BRIDGE_APPROACH_ROAD_LEN = 132;
@@ -6735,6 +7060,44 @@ function buildStoryBridgeEncounter() {
         sideRightW,
         sideD
     );
+
+    if (bridge2ModeActive) {
+        // Fill sky-bleed gaps left by hidden castle-role ground strips.
+        // 1. Endpoint x-strips: ±[STORY_BRIDGE_TRENCH_HALF_X … STORY_BRIDGE_WATER_MAX_X]
+        //    The side patches end at BRIDGE_WATER_MIN/MAX_X; the trench edge is
+        //    slightly inside that, leaving a narrow uncovered band.
+        const trenchEdgeL = -STORY_BRIDGE_TRENCH_HALF_X;
+        const trenchEdgeR =  STORY_BRIDGE_TRENCH_HALF_X;
+        const endGapLW = Math.max(0, trenchEdgeL - STORY_BRIDGE_WATER_MIN_X);
+        const endGapRW = Math.max(0, STORY_BRIDGE_WATER_MAX_X - trenchEdgeR);
+        if (endGapLW > 0.01) {
+            addBridgeGroundPatch(
+                (STORY_BRIDGE_WATER_MIN_X + trenchEdgeL) * 0.5,
+                sideCenterZ, endGapLW + 0.2, sideD + 0.4
+            );
+        }
+        if (endGapRW > 0.01) {
+            addBridgeGroundPatch(
+                (trenchEdgeR + STORY_BRIDGE_WATER_MAX_X) * 0.5,
+                sideCenterZ, endGapRW + 0.2, sideD + 0.4
+            );
+        }
+        // 2. Moat-margin strips: x ±[_MOX2 … BRIDGE_WATER_MIN/MAX_X], full band Z.
+        //    These were castle-role addGround strips, hidden in bridge2 mode.
+        //    The lake apron/rim only samples from trenchX1→trenchX2, so the
+        //    margin band (x –35.5→–29 and 29→35.5) has no coverage.
+        const moatMarginW = Math.max(0, STORY_BRIDGE_WATER_MIN_X - _MOX1) + 0.2;
+        if (moatMarginW > 0.2) {
+            addBridgeGroundPatch(
+                (_MOX1 + STORY_BRIDGE_WATER_MIN_X) * 0.5,
+                sideCenterZ, moatMarginW, sideD + 0.4
+            );
+            addBridgeGroundPatch(
+                (_MOX2 + STORY_BRIDGE_WATER_MAX_X) * 0.5,
+                sideCenterZ, moatMarginW, sideD + 0.4
+            );
+        }
+    }
 
     if (WATER_SYSTEM_ENABLED && BRIDGE_CHANNEL_WATER_ENABLED && !bridge2ModeActive) {
         // Water and shore now share one sampled shoreline edge, so the join is
@@ -7333,7 +7696,7 @@ function buildStoryBridgeEncounter() {
 
         const addBridgeLakeShoulder = (edgePoints, sideHint = 1) => {
             if (!bridge2ModeActive || !edgePoints || edgePoints.length < 2) return;
-            const shoulderOutset = 2.6;
+            const shoulderOutset = 0.35;
             const shoulderInset = 0.08;
             const pos = [];
             const uv = [];
@@ -7942,6 +8305,7 @@ function buildStoryBridgeEncounter() {
     const snap = (v, s) => Math.round(v / s) * s;
     const getBridgeHalfExtents = (orient) => {
         if (orient === 'z') return { hx: BS.d * 0.5, hy: BS.h * 0.5, hz: WALL_BRICK_HALF_LEN };
+        if (orient === 's') return { hx: BS.d * 0.5, hy: BS.h * 0.25, hz: WALL_BRICK_HALF_LEN };
         if (orient === 'y') return { hx: BS.h * 0.5, hy: WALL_BRICK_HALF_LEN, hz: BS.d * 0.5 };
         if (orient === 'c') return { hx: BS.h * 0.5, hy: BS.h * 0.5, hz: BS.h * 0.5 };
         if (orient === 'h') return { hx: WALL_BRICK_HALF_LEN, hy: BS.h * 0.25, hz: BS.d * 0.5 };
@@ -7975,7 +8339,7 @@ function buildStoryBridgeEncounter() {
         const sx = snap(x, 0.25);
         const sy = snap(y, 0.25);
         const sz = snap(z, 0.25);
-        const o = orient === 'z' ? 'z' : (orient === 'y' ? 'y' : (orient === 'c' ? 'c' : (orient === 'h' ? 'h' : 'x')));
+        const o = orient === 'z' ? 'z' : (orient === 's' ? 's' : (orient === 'y' ? 'y' : (orient === 'c' ? 'c' : (orient === 'h' ? 'h' : 'x'))));
         const tag = String(extraKey || '');
         const he = getBridgeHalfExtents(o);
         const qk = quat ? `|q${Math.round(quat.x * 1000)}|${Math.round(quat.y * 1000)}|${Math.round(quat.z * 1000)}|${Math.round(quat.w * 1000)}` : '';
@@ -7986,22 +8350,40 @@ function buildStoryBridgeEncounter() {
         if (!tag.startsWith('ramp-') && isOverlappingBridgeAabb(sx, sy, sz, he.hx, he.hy, he.hz)) return;
         occupied.add(key);
         if (o === 'z') { if (quat) createBrickZTiltQuat(sx, sy, sz, quat); else createBrickZ(sx, sy, sz); }
+        else if (o === 's') createBrickSlabZ(sx, sy, sz);
         else if (o === 'y') { if (quat) createBrickYTiltQuat(sx, sy, sz, quat); else createBrickY(sx, sy, sz); }
         else if (o === 'c') { if (quat) createBrickCubeTiltQuat(sx, sy, sz, quat); else createBrickCube(sx, sy, sz); }
         else if (o === 'h') createBrickSlab(sx, sy, sz);
         else if (quat) createBrickTiltQuat(sx, sy, sz, quat);
         else createBrick(sx, sy, sz);
         occupiedAabbs.push({ x: sx, y: sy, z: sz, hx: he.hx, hy: he.hy, hz: he.hz });
-        if (isAnchor) {
+        {
             const e = bricks[bricks.length - 1];
             if (e && e.body) {
-                // Keep anchor rows stable but still destructible.
-                e.body.type = CANNON.Body.DYNAMIC;
-                e.body.mass = Math.max(e.body.mass || 0, 180);
-                e.body.updateMassProperties();
-                e.body.linearDamping = Math.max(e.body.linearDamping, 0.34);
-                e.body.angularDamping = Math.max(e.body.angularDamping, 0.60);
-                e.body.sleep();
+                const shape = e.body.shapes?.[0];
+                if (shape?.halfExtents) {
+                    const mortarGapHalf = 0.04;
+                    if (o === 'z') {
+                        shape.halfExtents.x = Math.max(0.05, shape.halfExtents.x - mortarGapHalf);
+                    } else if (o === 'y' || o === 'c') {
+                        shape.halfExtents.x = Math.max(0.05, shape.halfExtents.x - mortarGapHalf);
+                        shape.halfExtents.z = Math.max(0.05, shape.halfExtents.z - mortarGapHalf);
+                    } else {
+                        shape.halfExtents.z = Math.max(0.05, shape.halfExtents.z - mortarGapHalf);
+                    }
+                    shape.updateConvexPolyhedronRepresentation();
+                    e.body.updateBoundingRadius();
+                    e.body.aabbNeedsUpdate = true;
+                }
+                if (isAnchor) {
+                    // Keep anchor rows stable but still destructible.
+                    e.body.type = CANNON.Body.DYNAMIC;
+                    e.body.mass = Math.max(e.body.mass || 0, 260);
+                    e.body.updateMassProperties();
+                    e.body.linearDamping  = Math.max(e.body.linearDamping,  0.36);
+                    e.body.angularDamping = Math.max(e.body.angularDamping, 0.64);
+                }
+                e.body.sleep();  // all bridge bricks start in a known sleeping state
             }
         }
         markStoryBridgeBrick();
@@ -8017,13 +8399,13 @@ function buildStoryBridgeEncounter() {
         const e = bricks[bricks.length - 1];
         if (e && e.body) {
             e.body.material = wallPhysMat;
-            e.body.linearDamping = 0.30;
+            e.body.linearDamping  = 0.30;
             e.body.angularDamping = 0.55;
             if (isAnchor) {
                 e.body.type = CANNON.Body.DYNAMIC;
-                e.body.mass = Math.max(e.body.mass || 0, 220);
-                e.body.linearDamping = Math.max(e.body.linearDamping, 0.34);
-                e.body.angularDamping = Math.max(e.body.angularDamping, 0.60);
+                e.body.mass = Math.max(e.body.mass || 0, 300);
+                e.body.linearDamping  = Math.max(e.body.linearDamping,  0.38);
+                e.body.angularDamping = Math.max(e.body.angularDamping, 0.66);
                 e.body.updateMassProperties();
             }
             e.bridgeWedge = true;
@@ -8046,9 +8428,10 @@ function buildStoryBridgeEncounter() {
     const wedgeQ = new THREE.Quaternion();
 
     const archCount = 4;
-    const archRadius = TOWER_BRICK_R;               // 1.5 centreline radius
+    const archRadius = TOWER_BRICK_R;               // 3.5 centreline radius
     const archSpringY = 0.5;
-    const RO = archRadius + BS.d / 2;               // 2.0 extrados radius
+    const RO = archRadius + BS.d / 2;               // 4.0 extrados radius
+    const archMortarClearance = 0.08;
     const pierW = 2.0;                              // target pillar width between arches
     const deckHalf = STORY_BRIDGE_DECK_HALF;        // core deck half-span (without extension)
     const supportSpanHalf = deckHalf + STORY_BRIDGE_RAMP_START_OFFSET;
@@ -8074,6 +8457,48 @@ function buildStoryBridgeEncounter() {
         const snapTie = Math.round(rel / ROAD_TIE_SPACING_X) * ROAD_TIE_SPACING_X + 0.5;
         return Math.abs(x - snapTie) <= 1e-6;
     };
+    const addBridgeFoundationFootings = () => {
+        const trenchFloorTopY = -(WATER_DEPTH_M * 2);
+        const footingHeight = -trenchFloorTopY;
+        const seen = new Set();
+        const addFooting = (x, z, hx, hz) => {
+            const key = `${x.toFixed(2)}|${z.toFixed(2)}|${hx.toFixed(2)}|${hz.toFixed(2)}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+
+            const body = new CANNON.Body({
+                mass: 0,
+                material: wallPhysMat,
+                shape: new CANNON.Box(new CANNON.Vec3(hx, footingHeight * 0.5, hz)),
+            });
+            body.position.set(x, trenchFloorTopY + footingHeight * 0.5, z);
+            world.addBody(body);
+            markStoryBridgeBody(body);
+
+            const mesh = new THREE.Mesh(
+                new THREE.BoxGeometry(hx * 2, footingHeight, hz * 2),
+                wedgeStoneMat
+            );
+            mesh.position.copy(body.position);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData.bridge2KeepVisible = true;
+            scene.add(mesh);
+            storyBridgeSceneMeshes.push(mesh);
+        };
+
+        for (const e of bricks) {
+            if ((e.storyRole || e.body?._storyRole) !== 'bridge' || !e.body) continue;
+            const halfExtents = e.body.shapes?.[0]?.halfExtents;
+            const foundationCenterY = halfExtents?.y ?? (BS.h * 0.5);
+            if (Math.abs(e.body.position.y - foundationCenterY) > 1e-3) continue;
+            if (halfExtents) {
+                addFooting(e.body.position.x, e.body.position.z, halfExtents.x, halfExtents.z);
+            } else if (e.bridgeWedge) {
+                addFooting(e.body.position.x, e.body.position.z, BS.d * 0.48, BS.d * 0.48);
+            }
+        }
+    };
     // Support piers are generated as a separate centred pass between arches so
     // they carry the deck without being forced into arch carve geometry.
 
@@ -8085,6 +8510,170 @@ function buildStoryBridgeEncounter() {
         for (const cx of archCenters) m = Math.min(m, Math.hypot(x - cx, ay));
         return m;
     };
+    const archRectDist = (x, y, hx, hy) => {
+        const ay = Math.max(0, y - hy - archSpringY);
+        let m = Infinity;
+        for (const cx of archCenters) {
+            const ax = Math.max(0, Math.abs(x - cx) - hx);
+            m = Math.min(m, Math.hypot(ax, ay));
+        }
+        return m;
+    };
+    const archCellDist = (x, y) => archRectDist(
+        x, y,
+        BS.d * 0.5 - 0.04,
+        BS.h * 0.5
+    );
+
+    // ==========================================================
+    // DEV BRIDGE: redesigned structure used when bridgeDevLevelEnabled
+    // is set in the dev menu. Falls through to the original bridge if
+    // the flag is off, so the production bridge is entirely untouched.
+    // Features: 8-row wedge arches, solid spandrel fill, heavy stone
+    // road, solid + battlement parapets, staircase approaches.
+    // ==========================================================
+    if (bridgeDevLevelEnabled) {
+        const devTunnelRows = 8;   // thicker arch rings than production's 6
+        const devDeckY      = 5.5; // must stay in sync with _BRIDGE_DECK_Y - 0.5 (walker analytic)
+        const devSubTopY    = 4.0;
+        const devGroundY    = BS.h * 0.5;       // 0.5
+        const devSpan       = supportSpanHalf;   // 24 m
+        const devCarveClear = RO + archMortarClearance;
+
+        const devStrengthen = (mass, ld, ad) => {
+            const e = bricks[bricks.length - 1];
+            if (!e || !e.body) return;
+            e.body.mass = Math.max(e.body.mass || 0, mass);
+            e.body.updateMassProperties();
+            e.body.linearDamping  = Math.max(e.body.linearDamping,  ld);
+            e.body.angularDamping = Math.max(e.body.angularDamping, ad);
+            e.body.sleep();
+        };
+
+        // 1. Arch voussoir rings — 8 deep for impressive thick masonry
+        for (let i = 0; i < archCount; i++) {
+            const cX = archCenters[i];
+            for (let row = 0; row < devTunnelRows; row++) {
+                const z = zCenter + (row - (devTunnelRows - 1) * 0.5) * zStep;
+                for (let j = 0; j < voussoirCount; j++) {
+                    const theta = startTheta - j * TOWER_A_STEP;
+                    const x = cX + Math.cos(theta) * archRadius;
+                    const y = archSpringY + Math.sin(theta) * archRadius;
+                    radial.set(Math.cos(theta), Math.sin(theta), 0).normalize();
+                    tangent.set(-Math.sin(theta), Math.cos(theta), 0).normalize();
+                    basis.makeBasis(tangent, normalZ, radial);
+                    wedgeQ.setFromRotationMatrix(basis);
+                    placeBridgeWedge(x, y, z, wedgeQ, j === 0 || j === voussoirCount - 1);
+                }
+            }
+        }
+
+        // 2. Solid spandrel substructure (ground → subTopY, arches carved out)
+        for (let xc = -devSpan + 0.5; xc <= devSpan - 0.5 + 1e-6; xc += 1.0) {
+            if (isSupportBandX(xc)) continue;
+            for (let y = devGroundY; y <= devSubTopY + 1e-6; y += BS.h) {
+                if (archCellDist(xc, y) < devCarveClear) continue;
+                const isFound  = y <= devGroundY + 1e-6;
+                const isHaunch = !isFound && archCellDist(xc, y - BS.h) < devCarveClear;
+                const anch     = isFound || isHaunch;
+                placeBridgeBrick(xc, y, zCenter - 2, 'z', 'dsub', null, anch);
+                placeBridgeBrick(xc, y, zCenter,     'z', 'dsub', null, anch);
+                placeBridgeBrick(xc, y, zCenter + 2, 'z', 'dsub', null, anch);
+            }
+        }
+
+        // 3. Between-arch support piers (fully packed running bond, full height)
+        for (const sx of supportBands) {
+            for (let y = devGroundY; y <= devSubTopY + 1e-6; y += BS.h) {
+                const ph   = ((Math.round((y - devGroundY) / BS.h) % 2) + 2) % 2;
+                const anch = y <= devGroundY + 1e-6;
+                if (!ph) {
+                    for (let zc = zCenter - 2.5; zc <= zCenter + 2.5 + 1e-6; zc += 1.0) {
+                        placeBridgeBrick(sx, y, zc, 'x', 'dpier-a', null, anch);
+                    }
+                } else {
+                    for (const xc of [sx - 0.5, sx + 0.5]) {
+                        for (const zc of [zCenter - 2, zCenter, zCenter + 2]) {
+                            placeBridgeBrick(xc, y, zc, 'z', 'dpier-b', null, anch);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Half-height caps fill y=4.0..4.5 above the final full course. Near
+        // each crown the arch itself occupies this layer and carries the bearing.
+        const devCapY = devSubTopY + BS.h * 0.25;
+        for (let xc = -devSpan + 1.0; xc <= devSpan - 1.0 + 1e-6; xc += 2.0) {
+            if (archRectDist(xc, devCapY, WALL_BRICK_HALF_LEN, BS.h * 0.25) < devCarveClear) continue;
+            for (let zc = zCenter - 3; zc <= zCenter + 3 + 1e-6; zc += 1.0) {
+                placeBridgeBrick(xc, devCapY, zc, 'h', 'd-support-cap', null, true);
+            }
+        }
+
+        // 4. Deck bearing course (half-height slabs, bridging pier tops to road)
+        const devBearY = devSubTopY + BS.h * 0.75;
+        for (let xc = -devSpan + 1.0; xc <= devSpan - 1.0 + 1e-6; xc += 2.0) {
+            for (let zc = zCenter - 3; zc <= zCenter + 3 + 1e-6; zc += 1.0) {
+                placeBridgeBrick(xc, devBearY, zc, 'h', 'dbear', null, true);
+            }
+        }
+
+        // 5. Stone road — heavy X-beam planks across full 7m width
+        const devRoadZs = [zCenter-3, zCenter-2, zCenter-1, zCenter, zCenter+1, zCenter+2, zCenter+3];
+        for (const zc of devRoadZs) {
+            for (let xc = -devSpan + 1.0; xc <= devSpan - 1.0 + 1e-6; xc += 2.0) {
+                const overPier = isSupportBandX(xc) || isSupportBandX(xc - 1.0) || isSupportBandX(xc + 1.0);
+                const anch = overPier || isRoadTieX(xc);
+                placeBridgeBrick(xc, devDeckY, zc, 'x', 'droad', null, anch);
+                devStrengthen(anch ? 320 : 240, 0.45, 0.78);
+            }
+        }
+
+        // 6. Solid parapets (2 full courses) + battlement row (every other merlon)
+        const pzN = zCenter - 3, pzP = zCenter + 3;
+        for (const pz of [pzN, pzP]) {
+            let mIdx = 0;
+            for (let xc = -devSpan + 1.0; xc <= devSpan - 1.0 + 1e-6; xc += 2.0) {
+                placeBridgeBrick(xc, devDeckY + BS.h,       pz, 'x', 'dpar1');
+                placeBridgeBrick(xc, devDeckY + 2 * BS.h,   pz, 'x', 'dpar2');
+                if (mIdx % 2 === 0) placeBridgeBrick(xc, devDeckY + 3 * BS.h, pz, 'x', 'dparm');
+                mIdx++;
+            }
+        }
+
+        // 7. Staircase approaches: twelve 0.5 m rises with 1 m treads.
+        //    Each column fills solid from ground up so nothing floats.
+        for (const sgn of [-1, 1]) {
+            for (let k = 1; k <= STORY_BRIDGE_RAMP_LEN; k++) {
+                const surfaceY = Math.max(BS.h * 0.5, devDeckY + BS.h * 0.5 - k * BS.h * 0.5);
+                const stepY = surfaceY - BS.h * 0.25;
+                const xc    = sgn * (devSpan + k - 0.5);
+                const supportTopY = surfaceY - BS.h * 0.5;
+                const needsHalfBase = Math.abs(supportTopY - Math.round(supportTopY)) > 1e-6;
+                if (needsHalfBase) {
+                    placeBridgeBrick(xc, BS.h * 0.25, zCenter - 2, 's', 'dsbase' + k, null, true);
+                    placeBridgeBrick(xc, BS.h * 0.25, zCenter,     's', 'dsbase' + k, null, true);
+                    placeBridgeBrick(xc, BS.h * 0.25, zCenter + 2, 's', 'dsbase' + k, null, true);
+                }
+                const firstFullY = needsHalfBase ? BS.h : devGroundY;
+                for (let fy = firstFullY; fy <= supportTopY - BS.h * 0.5 + 1e-6; fy += BS.h) {
+                    const fanch = fy <= firstFullY + 1e-6;
+                    placeBridgeBrick(xc, fy, zCenter - 2, 'z', 'dsfill' + k, null, fanch);
+                    placeBridgeBrick(xc, fy, zCenter,     'z', 'dsfill' + k, null, fanch);
+                    placeBridgeBrick(xc, fy, zCenter + 2, 'z', 'dsfill' + k, null, fanch);
+                }
+                placeBridgeBrick(xc, stepY, zCenter - 2, 's', 'dstep' + k, null, true);
+                placeBridgeBrick(xc, stepY, zCenter,     's', 'dstep' + k, null, true);
+                placeBridgeBrick(xc, stepY, zCenter + 2, 's', 'dstep' + k, null, true);
+            }
+        }
+
+        addBridgeFoundationFootings();
+        storyBridgeBudget = placedCount;
+        return;
+    }
+    // === End dev bridge — production bridge masonry follows unchanged ===
 
     // --- Arch rings (anchored at both ends, re-spaced for 2-brick piers) ---
     for (let i = 0; i < archCount; i++) {
@@ -8105,11 +8694,10 @@ function buildStoryBridgeEncounter() {
     }
 
     // --- Levels ---
-    const deckY = 5.0;                 // road centre lifted clear of arch crowns
-    const subTopY = deckY - BS.h;      // top fill just under the roadway
-    const groundY = BS.h * 0.5;        // 0.5 lowest brick centre
-    const rampDrop = deckY - groundY;
-    const carveClear = RO + 0.8;       // extra tunnel clearance from the voussoir ring
+    const deckY = 5.5;                 // road centre above the bearing course
+    const subTopY = 4.0;               // height target; final full course spans y=3.0..4.0
+    const groundY = BS.h * 0.5;        // 0.5: lowest brick centre
+    const carveClear = RO + archMortarClearance;
 
     // --- Solid substructure: piers / abutments / spandrels with arches carved out.
     //     Z-bricks (1 wide in X) butt cleanly on a 1 m X grid; arch tunnels are
@@ -8118,14 +8706,14 @@ function buildStoryBridgeEncounter() {
         const inSupportBand = isSupportBandX(xc);
         for (let y = groundY; y <= subTopY + 1e-6; y += BS.h) {
             if (inSupportBand) continue;
-            if (archDist(xc, y) < carveClear) continue;
+            if (archCellDist(xc, y) < carveClear) continue;
             const isFoundationRow = y <= groundY + 1e-6;
             const isDeckTieRow = (y >= subTopY - 1e-6) && isRoadTieX(xc);
             // Haunch rows: the first course whose cell BELOW was carved out by
             // the arch � these bricks hover over the voussoir ring on the snap
             // grid. Anchor them (heavy + damped) so a blast doesn't free-fall
             // them onto the arch and unzip the span.
-            const isHaunchRow = !isFoundationRow && archDist(xc, y - BS.h) < carveClear;
+            const isHaunchRow = !isFoundationRow && archCellDist(xc, y - BS.h) < carveClear;
             const isAnchorRow = isFoundationRow || isDeckTieRow || isHaunchRow;
             placeBridgeBrick(xc, y, zCenter - 2, 'z', 'sub', null, isAnchorRow);
             placeBridgeBrick(xc, y, zCenter,     'z', 'sub', null, isAnchorRow);
@@ -8133,46 +8721,64 @@ function buildStoryBridgeEncounter() {
         }
     }
 
-    // --- Between-arch support piers (staggered), centred in each bay.
-    //     Built separately so they remain clear of arch voussoirs and still
-    //     connect continuously from waterline to deck underside.
+    // --- Between-arch support piers, centred in each bay.
+    //     Every course fills the full 2 x 6 m pier footprint. Alternating
+    //     X/Z running bond interlocks the masonry without overlapping bricks;
+    //     the old sparse rows left one-metre voids under half of each course.
     for (const sx of supportBands) {
         for (let y = groundY; y <= subTopY + 1e-6; y += BS.h) {
             const supportRow = Math.round((y - groundY) / BS.h);
             const supportPhase = ((supportRow % 2) + 2) % 2;
             const isFoundationRow = y <= groundY + 1e-6;
             if (!supportPhase) {
-                placeBridgeBrick(sx, y, zCenter - 2, 'x', 'support-rib-a', null, isFoundationRow);
-                placeBridgeBrick(sx, y, zCenter,     'x', 'support-rib-a', null, isFoundationRow);
-                placeBridgeBrick(sx, y, zCenter + 2, 'x', 'support-rib-a', null, isFoundationRow);
+                for (let zc = zCenter - 2.5; zc <= zCenter + 2.5 + 1e-6; zc += 1.0) {
+                    placeBridgeBrick(sx, y, zc, 'x', 'support-rib-a', null, isFoundationRow);
+                }
             } else {
-                placeBridgeBrick(sx, y, zCenter - 1, 'x', 'support-rib-b', null, isFoundationRow);
-                placeBridgeBrick(sx, y, zCenter + 1, 'x', 'support-rib-b', null, isFoundationRow);
+                for (const xc of [sx - 0.5, sx + 0.5]) {
+                    for (const zc of [zCenter - 2, zCenter, zCenter + 2]) {
+                        placeBridgeBrick(xc, y, zc, 'z', 'support-rib-b', null, isFoundationRow);
+                    }
+                }
             }
         }
-        // Cap the pier into the deck underside with half-height slabs at the
-        // bearing level (rib tops are at subTopY; the old full-height caps at
-        // subTopY interpenetrated the top rib course and were silently pruned
-        // by the AABB check � leaving the deck floating).
-        placeBridgeBrick(sx, subTopY + BS.h * 0.25, zCenter - 1, 'h', 'support-cap', null, true);
-        placeBridgeBrick(sx, subTopY + BS.h * 0.25, zCenter + 1, 'h', 'support-cap', null, true);
+    }
+
+    // The full-height grid ends at centre y=3.5 (top y=4.0). Fill the actual
+    // 0.5 m gap below the bearing, except where the arch crown reaches y=4.5.
+    const supportCapY = subTopY + BS.h * 0.25;
+    for (let xc = -supportSpanHalf + 1.0; xc <= supportSpanHalf - 1.0 + 1e-6; xc += 2.0) {
+        if (archRectDist(xc, supportCapY, WALL_BRICK_HALF_LEN, BS.h * 0.25) < carveClear) continue;
+        for (let zc = zCenter - 3; zc <= zCenter + 3 + 1e-6; zc += 1.0) {
+            placeBridgeBrick(xc, supportCapY, zc, 'h', 'deck-support-cap', null, true);
+        }
     }
 
     // --- Deck bearing course: half-height slab layer that fills the exact
-    //     0.5 m gap between the substructure top (subTopY, y=4.0) and the deck
-    //     underside (deckY - BS.h/2, y=4.5). The previous full-height X-brick
+    //     0.5 m gap between the substructure/arch top (y=4.5) and the deck
+    //     underside (y=5.0). The previous full-height X-brick
     //     caps at subTopY overlapped the top substructure course and were all
     //     pruned by the AABB check � so the whole road spawned floating in
     //     mid-air and one explosive wake unzipped the entire span. Slabs are
-    //     laid continuously (2 m pitch, butted) along all three deck seat rows;
+    //     laid continuously (2 m pitch, butted) under all seven road lanes;
     //     over the support bands they bridge the 1 m bay like lintels, resting
     //     on the sub columns either side.
-    const bearingY = subTopY + BS.h * 0.25;   // 4.25: spans 4.0 ? 4.5
+    const bearingY = subTopY + BS.h * 0.75;   // 4.75: spans 4.5..5.0
     for (let xc = -supportSpanHalf + 1.0; xc <= supportSpanHalf - 1.0 + 1e-6; xc += 2.0) {
-        placeBridgeBrick(xc, bearingY, zCenter - 2, 'h', 'deck-bearing', null, true);
-        placeBridgeBrick(xc, bearingY, zCenter,     'h', 'deck-bearing', null, true);
-        placeBridgeBrick(xc, bearingY, zCenter + 2, 'h', 'deck-bearing', null, true);
+        for (let zc = zCenter - 3; zc <= zCenter + 3 + 1e-6; zc += 1.0) {
+            placeBridgeBrick(xc, bearingY, zc, 'h', 'deck-bearing', null, true);
+        }
     }
+
+    // Continuous trench-floor physics for every bridge mode catches rubble on
+    // the bed. Discrete footings below meet the dynamic masonry exactly at y=0.
+    const trenchFloorTopY = -(WATER_DEPTH_M * 2);   // -1.4
+    addStoryBridgeGroundBody(
+        0, zCenter,
+        STORY_BRIDGE_TRENCH_HALF_X * 2 + 4,
+        tunnelRows + 4,
+        trenchFloorTopY
+    );
 
     // --- One staggered Z-brick deck column (shared by road + ramp body).
     //     Even columns lay z-bricks at -2/0/+2; odd columns are offset half a
@@ -8194,21 +8800,49 @@ function buildStoryBridgeEncounter() {
         }
     };
 
-    // --- Road surface across the whole span ---
-    // Tie columns (every ROAD_TIE_SPACING_X) are anchor-grade: heavy, damped
-    // �pile� columns that act as collapse firebreaks so one blast breaches a
-    // bay instead of unzipping the entire deck.
+    // --- Road surface: longitudinal X-brick beams ---
+    // A real stone bridge deck is spanned by long beams resting on piers.
+    // Replacing the staggered Z-brick running bond with continuous X-aligned
+    // beams (2 m long) makes each deck plank a heavy, stable body that is far
+    // less sensitive to small impulses. The beams sit directly on the
+    // substructure/bearing course and are locked together by transverse ties
+    // over every support band, so a local hit breaches one bay instead of
+    // rippling the whole span.
     const roadSpanHalf = deckHalf + STORY_BRIDGE_RAMP_START_OFFSET;
-    for (let xc = -roadSpanHalf + 0.5; xc <= roadSpanHalf - 0.5 + 1e-6; xc += 1.0) {
-        placeDeckColumn(xc, deckY, null, isRoadTieX(xc));
+    const deckBeamRowsZ = [zCenter - 3, zCenter - 2, zCenter - 1, zCenter,
+                           zCenter + 1, zCenter + 2, zCenter + 3];
+    const strengthenLastBrick = (mass, linearDamp, angularDamp) => {
+        const e = bricks[bricks.length - 1];
+        if (!e || !e.body) return;
+        e.body.mass = Math.max(e.body.mass || 0, mass);
+        e.body.updateMassProperties();
+        e.body.linearDamping = Math.max(e.body.linearDamping, linearDamp);
+        e.body.angularDamping = Math.max(e.body.angularDamping, angularDamp);
+        e.body.sleep();
+    };
+    for (const zc of deckBeamRowsZ) {
+        for (let xc = -roadSpanHalf + 1.0; xc <= roadSpanHalf - 1.0 + 1e-6; xc += 2.0) {
+            const overSupport = isSupportBandX(xc) || isSupportBandX(xc - 1.0) || isSupportBandX(xc + 1.0);
+            const isTie = isRoadTieX(xc);
+            const isAnchor = overSupport || isTie;
+            placeBridgeBrick(xc, deckY, zc, 'x', 'deck-beam', null, isAnchor);
+            strengthenLastBrick(isAnchor ? 320 : 240, 0.45, 0.78);
+        }
+    }
+    // Transverse ties over support bands lock the longitudinal beams together.
+    for (const sx of supportBands) {
+        for (const zc of [zCenter - 2, zCenter, zCenter + 2]) {
+            placeBridgeBrick(sx, deckY, zc, 'z', 'deck-tie', null, true);
+            strengthenLastBrick(300, 0.45, 0.78);
+        }
     }
 
     // --- Side parapets rebuilt as a simple stable running bond:
     // X-bricks are 2 m long, so centres must be spaced by BS.w (2 m) to avoid
     // 50% overlap. Alternate courses are shifted by half a brick (1 m).
     const parapetBaseY = deckY;
-    const parapetZNeg = zCenter - 3.5;
-    const parapetZPos = zCenter + 3.5;
+    const parapetZNeg = zCenter - 3;
+    const parapetZPos = zCenter + 3;
     const parapetCourses = 3;
     const parapetPitch = BS.w;
     const parapetHalfBrick = BS.w * 0.5;
@@ -8241,12 +8875,9 @@ function buildStoryBridgeEncounter() {
         }
     }
 
-    // --- Ramps: staircase using the same deck-column Z pattern so bricks
-    //     align visually with the main span. Z-bricks are 1 m wide in X
-    //     (hx = BS.d/2 = 0.5), so adjacent 1 m columns touch but never overlap.
+    // --- Ramps: twelve half-height rises with one-metre treads. Rotated slabs
+    //     are 1 m along X and 2 m across Z, giving a walkable 1:2 stair slope.
     const rampLen = Math.round(STORY_BRIDGE_RAMP_LEN);
-    const stairStepCount = Math.max(1, Math.round(rampDrop / BS.h));
-    const colsPerStep = Math.max(1, Math.floor(rampLen / stairStepCount));
     const rampOccupiedCells = new Set();
     const placeRampBrick = (x, y, z, orient, extraKey, isAnchor = false) => {
         const sx = snap(x, 0.25);
@@ -8273,22 +8904,34 @@ function buildStoryBridgeEncounter() {
         }
     };
 
-    const placeRampColumn = (xc, yc) => {
-        placeRampRow(xc, yc, `rtop-${xc}`, true);
-        for (let y = groundY; y <= yc - BS.h + 1e-6; y += BS.h) {
-            placeRampRow(xc, y, `rcore-${xc}-${y}`, y <= groundY + 1e-6);
+    const placeRampSlabRow = (xc, y, key, isAnchor = false) => {
+        for (const zc of [zCenter - 2, zCenter, zCenter + 2]) {
+            placeRampBrick(xc, y, zc, 's', `${key}-${zc}`, isAnchor);
         }
     };
 
+    const placeRampColumn = (xc, surfaceY) => {
+        const slabCenterY = surfaceY - BS.h * 0.25;
+        const supportTopY = surfaceY - BS.h * 0.5;
+        const needsHalfBase = Math.abs(supportTopY - Math.round(supportTopY)) > 1e-6;
+        if (needsHalfBase) placeRampSlabRow(xc, BS.h * 0.25, `rbase-${xc}`, true);
+        const firstFullY = needsHalfBase ? BS.h : groundY;
+        for (let y = firstFullY; y <= supportTopY - BS.h * 0.5 + 1e-6; y += BS.h) {
+            placeRampRow(xc, y, `rcore-${xc}-${y}`, y <= firstFullY + 1e-6);
+        }
+        placeRampSlabRow(xc, slabCenterY, `rtread-${xc}`, true);
+    };
+
+    const deckSurfaceY = deckY + BS.h * 0.5;
     for (const sgn of [-1, 1]) {
         for (let k = 1; k <= rampLen; k++) {
-            const stepIdx = Math.min(stairStepCount - 1, Math.floor((k - 1) / colsPerStep));
             const xc = sgn * (deckHalf + STORY_BRIDGE_RAMP_START_OFFSET + k - 0.5);
-            const yc = deckY - stepIdx * BS.h;
-            placeRampColumn(xc, yc);
+            const surfaceY = Math.max(BS.h * 0.5, deckSurfaceY - k * BS.h * 0.5);
+            placeRampColumn(xc, surfaceY);
         }
     }
 
+    addBridgeFoundationFootings();
     storyBridgeBudget = placedCount;
 
 }
@@ -8349,20 +8992,22 @@ function spawnStoryBridgeConvoy(diffKey) {
 }
 
 // Analytical bridge surface Y at a given X position.
-// Returns the expected walking surface: 0 on the approach road, linearly
-// rising on the ramp, and flat at deck height across the main span + arch piers.
+// Returns the expected walking surface: 0 on the approach road, half-height
+// steps on the ramp, and flat at deck height across the main span + arch piers.
 // This avoids all brick-scan filter headaches (wall bricks, arch keystones, etc.)
 // and gives exactly the same surface the player walks on.
-// deckY=5.0 (Z-brick centres); deck top surface = deckY + BS.h*0.5 = 5.5 m.
-const _BRIDGE_DECK_Y = 5.5;
+// deckY=5.5 (brick centres); deck top surface = deckY + BS.h*0.5 = 6.0 m.
+const _BRIDGE_DECK_Y = 6.0;
 const _BRIDGE_RAMP_INNER = STORY_BRIDGE_DECK_HALF + STORY_BRIDGE_RAMP_START_OFFSET; // 24
 function bridgeWalkerSurfaceY(x) {
     const ax = Math.abs(x);
     if (ax >= STORY_BRIDGE_RAMP_OUTER_X) return 0;           // approach road
     if (ax <= _BRIDGE_RAMP_INNER) return _BRIDGE_DECK_Y;    // flat deck + arch section
-    // Ramp: linearly interpolate between deck height and ground
-    const t = (STORY_BRIDGE_RAMP_OUTER_X - ax) / (STORY_BRIDGE_RAMP_OUTER_X - _BRIDGE_RAMP_INNER);
-    return THREE.MathUtils.clamp(t, 0, 1) * _BRIDGE_DECK_Y;
+    const step = Math.min(
+        STORY_BRIDGE_RAMP_LEN,
+        Math.floor(ax - _BRIDGE_RAMP_INNER) + 1
+    );
+    return Math.max(BS.h * 0.5, _BRIDGE_DECK_Y - step * BS.h * 0.5);
 }
 
 function storyBridgeSupportY(x, z, currentY = 8) {
@@ -9216,36 +9861,51 @@ function initTowerGuardPost(npc, cx, cz, outwardAngle, topY) {
     const deck = towerPlatforms.find(p => Math.abs(p.cx - cx) < 0.01 && Math.abs(p.cz - cz) < 0.01);
     const deckRadius = deck ? deck.rad : (TOWER_R - 0.7);
     const exposedRadius = Math.max(0.35, deckRadius * 0.84);
-    const coverRadius = Math.max(0.2, exposedRadius - 0.30);
+    const coverRadius = Math.max(0.18, exposedRadius - 0.52);
     const safeRadius = Math.max(0.3, exposedRadius + 0.03);
-    const startAngle = outwardAngle + (Math.random() - 0.5) * 0.45;
+
+    // Merlon (solid battlement) angles for this tower — archers tuck behind
+    // these and lean into the crenel gaps between them to shoot. Mirrors the
+    // layout produced by addRoundBattlements() so cover lines up visually.
+    const battleBrickR = TOWER_R - BS.d / 2;
+    const nBattle = Math.max(2, Math.round(2 * Math.PI * battleBrickR / BS.w));
+    const gapStep = (2 * Math.PI) / nBattle;
+    const merlonAngles = [];
+    for (let i = 0; i < nBattle; i += 2) merlonAngles.push(i * gapStep);
+
+    // Start behind whichever merlon is closest to the guard's outward facing.
+    const angDist = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+    let coverAngle = merlonAngles[0];
+    for (const m of merlonAngles) {
+        if (angDist(m, outwardAngle) < angDist(coverAngle, outwardAngle)) coverAngle = m;
+    }
 
     npc.towerGuardPost = {
         cx,
         cz,
         baseY: topY,
-        angle: startAngle,
-        targetAngle: startAngle,
+        merlonAngles,
+        gapStep,
+        coverAngle,
+        peekAngle: coverAngle,
+        angle: coverAngle,
+        targetAngle: coverAngle,
         safeRadius,
-        coverRadius: Math.max(0.18, coverRadius - 0.22),
+        coverRadius,
         exposedRadius,
-        isPeeking: Math.random() < 0.5,
-        phaseTimer: 0.0,
+        state: 'hide',
+        isPeeking: false,
+        stateTimer: 1.0 + Math.random() * 2.8,
+        diveCooldown: 5.0 + Math.random() * 6.0,
         fistTimer: 0,
         fistDuration: 1.15,
         fistCooldown: 6.0 + Math.random() * 7.0,
         scanPhase: (Math.random() * 8) | 0,
         collisionPhase: (Math.random() * 3) | 0,
-        repositionTimer: 1.8 + Math.random() * 2.6,
     };
 
-    npc.towerGuardPost.phaseTimer = npc.towerGuardPost.isPeeking
-        ? (1.1 + Math.random() * 1.0)
-        : (1.7 + Math.random() * 1.8);
-
-    const initialRadius = npc.towerGuardPost.isPeeking ? npc.towerGuardPost.exposedRadius : npc.towerGuardPost.coverRadius;
-    npc.group.position.x = cx + Math.sin(startAngle) * initialRadius;
-    npc.group.position.z = cz + Math.cos(startAngle) * initialRadius;
+    npc.group.position.x = cx + Math.sin(coverAngle) * coverRadius;
+    npc.group.position.z = cz + Math.cos(coverAngle) * coverRadius;
     npc.group.position.y = topY;
 }
 
@@ -9964,6 +10624,8 @@ function activateRagdoll(npc, ballBody, isExplosion = false, opts = null) {
     npc.npcPanicSwim = null;
     npc.isRagdoll = true;
     npc.group.visible = false;
+    // In kill-win modes (e.g. Extreme Destruction) check if this was the last enemy.
+    if (DIFFICULTIES[currentDifficulty] && DIFFICULTIES[currentDifficulty].killWin) checkGameOver();
     npc.ragdollSpawnAt = spawnNow;
     npc.ragdollExpireAt = spawnNow + RAGDOLL_TTL_MS;
     npc.ragdollWaterState = null;
@@ -10305,6 +10967,7 @@ let storyModePreference = false;    // user-selected start mode from the modal (
 let levelPreference = 'castle';     // user-selected level when not in story campaign
 let templateLevelEnabled = false;   // settings override: empty grass template level
 let bridge2LevelEnabled = false;    // settings override: template + bridge bricks/physics only
+let bridgeDevLevelEnabled = false;  // settings override: rebuilt dev bridge with steps + thick arches
 let bridgeNewLevelEnabled = false;  // settings override: new bridge level (kept for legacy localStorage compat)
 let cursorInspectorEnabled = false; // dev: crosshair mesh inspector pill
 let castleNewLevelEnabled = false;  // settings override: new castle level (kept for legacy localStorage compat)
@@ -12019,12 +12682,77 @@ function beginBridge2TemplateLevel() {
     }
 
     setStoryHud('Bridge 2: Bridge bricks + physics only');
+    // Use flat green so z-fighting (if any) shows as a clean colour contrast
+    // rather than wild texture flickering, making the glitch easier to read.
+    _applyGroundMaterial(grassFlatMat);
+}
+
+function beginBridgeDevLevel() {
+    bridge2ModeActive = true;
+    storyModeEnabled = true;
+    storyCampaignActive = false;
+    storyStage = 1;
+    bridgeStageCompletePendingAdvance = false;
+    bridgeStageClearPendingAt = 0;
+    bridgeStageClearCalmSince = 0;
+    storyBridgeHadNpcWave = false;
+
+    setTemplateGroundOverrideActive(false);
+
+    camera.position.set(0, PLAYER_BASE_Y, STORY_BRIDGE_Z - 36);
+    yaw = Math.PI;
+    pitch = 0.05;
+
+    buildStoryBridgeEncounter();
+
+    setStoryBridgeSuppressed(true);
+    setStoryBridgeSuppressed(false);
+    setStoryCastleSuppressed(true);
+    for (const wp of levelWaterPlanes) {
+        if (wp?.levelRole !== 'castle') continue;
+        if (wp.underlay) wp.underlay.visible = false;
+        if (wp.ripple) wp.ripple.visible = false;
+        if (wp.ripple2) wp.ripple2.visible = false;
+        if (wp.ripple3) wp.ripple3.visible = false;
+        if (wp.foam) wp.foam.visible = false;
+    }
+    for (const r of waterImpactRipples) {
+        if (r?.role !== 'castle' || !r.mesh) continue;
+        r.mesh.visible = false;
+    }
+    for (const wm of bridgeLibraryWaterSurfaces) {
+        const role = wm?.userData?.waterRole || 'bridge';
+        if (role === 'castle' && wm) wm.visible = false;
+    }
+    if (typeof moatReflector !== 'undefined' && moatReflector) moatReflector.visible = false;
+    for (const m of castleSceneMeshes) {
+        if (m) m.visible = false;
+    }
+    updateTotalBricksUi();
+
+    for (const npc of npcList) {
+        if (!npc.storyRole) npc.storyRole = 'castle';
+        setNpcStoryDormant(npc, true);
+    }
+
+    if (ballista) {
+        ballista.storyDormant = true;
+        ballista.group.visible = false;
+    }
+
+    setStoryHud('Bridge Dev: rebuilt design — thick arches, stone road, battlements, stair approaches');
 }
 
 function beginStoryModeRound() {
+    _applyGroundMaterial(grassMat);  // restore textured grass for any non-bridge2 level
     setTemplateGroundOverrideActive(false);
     bridge2ModeActive = false;
     applyRandomSeason();   // every level/round rolls a fresh season + weather
+
+    if (bridgeDevLevelEnabled) {
+        beginBridgeDevLevel();
+        return;
+    }
 
     if (bridge2LevelEnabled) {
         beginBridge2TemplateLevel();
@@ -12486,7 +13214,7 @@ function showGameOver(killedByArrows = false, storyVictory = false, defeatReason
         document.getElementById('goScores').textContent = `You slipped into the water and sank after ${Math.max(0.1, playerWaterLastDurationSec).toFixed(1)} seconds. Score: ${score} pts`;
         recordHighScore(currentDifficulty, mode, twoPlayerMode ? Math.max(score, p2Score) : score);
     } else if (killedByArrows) {
-        document.getElementById('goMsg').textContent = '?? Slain by the castle guards!';
+        document.getElementById('goMsg').textContent = '\u2694\ufe0f Slain by the castle guards!';
         document.getElementById('goScores').textContent = `Hit 3 times before the walls fell. Score: ${score} pts`;
         recordHighScore(currentDifficulty, mode, twoPlayerMode ? Math.max(score, p2Score) : score);
     } else if (twoPlayerMode) {
@@ -12564,9 +13292,15 @@ function _countUp(target, durationMs, render) {
 
 function checkGameOver() {
     if (storyModeEnabled && !twoPlayerMode) return;
-    const p1Done = p1Ammo.every(a => a === 0);
-    const p2Done = !twoPlayerMode || p2Ammo.every(a => a === 0);
-    if (!p1Done || !p2Done) return;
+    const diff = DIFFICULTIES[currentDifficulty];
+    if (diff && diff.killWin) {
+        // Extreme mode: win when every enemy is down
+        if (npcList.length === 0 || !npcList.every(n => n.isRagdoll)) return;
+    } else {
+        const p1Done = p1Ammo.every(a => a === 0);
+        const p2Done = !twoPlayerMode || p2Ammo.every(a => a === 0);
+        if (!p1Done || !p2Done) return;
+    }
     // Wait for any in-flight balls to land before showing the overlay
     if (!gameOverPending) {
         gameOverPending = true;
@@ -13173,7 +13907,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
                 hit = true;
                 if (e.body && e.body.mass > 0) {
                     const spd = Math.sqrt(body.velocity.x * body.velocity.x + body.velocity.y * body.velocity.y + body.velocity.z * body.velocity.z) || 1;
-                    const nudge = hitIsPlank ? 9 : 20;  // planks take ~5� more hits before cascading
+                    const nudge = hitIsPlank ? 9 : 30;  // planks take ~5� more hits before cascading
                     e.body.wakeUp();
                     e.body.applyImpulse(
                         new CANNON.Vec3(
@@ -13482,10 +14216,10 @@ function fireCannonball(power, grenadeCookMs = 0) {
                     // Accumulate tiny "chip" energy on the struck resting brick.
                     // Sustained bursts can pop one exposed stone loose, but a single
                     // hit is too weak to disturb settled courses.
-                    e.body._mgChip = (e.body._mgChip || 0) + impact * 0.42;
-                    if (e.body._mgChip >= 75) {
+                    e.body._mgChip = (e.body._mgChip || 0) + impact * 0.65;
+                    if (e.body._mgChip >= 50) {
                         e.body._mgChip = 0;
-                        const chipImpulse = e.body.collisionFilterGroup === CGROUP_TOWER ? 32 : 38;
+                        const chipImpulse = e.body.collisionFilterGroup === CGROUP_TOWER ? 42 : 52;
                         e.body.wakeUp();
                         e.body.applyImpulse(
                             new CANNON.Vec3(
@@ -13502,7 +14236,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
                     }
                 } else {
                     // Loose debris still reacts immediately so bursts sweep rubble.
-                    const nudge = 10;
+                    const nudge = 16;
                     e.body.wakeUp();
                     e.body.applyImpulse(
                         new CANNON.Vec3(
@@ -13671,10 +14405,13 @@ function fireCannonball(power, grenadeCookMs = 0) {
                 const shouldRunNeighborhoodWake = !neighborhoodWakeDone;
                 if (shouldRunNeighborhoodWake) {
                     const hitRole = e.body?._storyRole || null;
+                    const isBridgeHit = hitRole === 'bridge';
                     const IMPACT_WAKE_R = isTowerHit
                         ? 2.9
-                        : (isSniper ? 0.55 : (hitRole === 'bridge' ? 1.05 : 1.7));
-                    const wakeLimit = hitRole === 'bridge' ? 20 : 40;
+                        : (isSniper ? 0.55 : (isBridgeHit ? 0.82 : 1.7));
+                    const IMPACT_WAKE_R2 = IMPACT_WAKE_R * IMPACT_WAKE_R;
+                    // Bridge: tiny local wake so one shot doesn't unzip the span.
+                    const wakeLimit = isBridgeHit ? 10 : 40;
                     let woke = 0;
                     const struckGrp = e.body.collisionFilterGroup;
                     const ix = body.position.x, iy = body.position.y, iz = body.position.z;
@@ -13683,11 +14420,9 @@ function fireCannonball(power, grenadeCookMs = 0) {
                         if (b.grp !== struckGrp) continue;   // stay within the struck structure
                         if (hitRole && b.storyRole !== hitRole) continue;
                         const dx = b.body.position.x - ix;
-                        if (dx > IMPACT_WAKE_R || dx < -IMPACT_WAKE_R) continue;
-                        const dz = b.body.position.z - iz;
-                        if (dz > IMPACT_WAKE_R || dz < -IMPACT_WAKE_R) continue;
                         const dy = b.body.position.y - iy;
-                        if (dy > IMPACT_WAKE_R || dy < -IMPACT_WAKE_R) continue;
+                        const dz = b.body.position.z - iz;
+                        if (dx * dx + dy * dy + dz * dz > IMPACT_WAKE_R2) continue;
                         if (b.body.sleepState !== 0) {
                             b.body.wakeUp();
                             woke++;
@@ -14149,8 +14884,9 @@ const waterRippleSizeValEl = document.getElementById('setWaterRippleSizeVal');
 const waterRippleLifeInputEl = document.getElementById('setWaterRippleLife');
 const waterRippleLifeValEl = document.getElementById('setWaterRippleLifeVal');
 const templateLevelInputEl = document.getElementById('setTemplateLevel');
-const bridge2LevelInputEl  = document.getElementById('setBridge2Level');
-const bridgeNewLevelInputEl = document.getElementById('setBridgeNewLevel');  // returns null (checkbox removed)
+const bridge2LevelInputEl     = document.getElementById('setBridge2Level');
+const bridgeDevLevelInputEl   = document.getElementById('setBridgeDevLevel');
+const bridgeNewLevelInputEl   = document.getElementById('setBridgeNewLevel');  // returns null (checkbox removed)
 const castleNewLevelInputEl = document.getElementById('setCastleNewLevel');  // returns null (checkbox removed)
 if (buildStampEl) buildStampEl.textContent = `Build: ${RELEASE_BUILD_STAMP}`;
 
@@ -14253,9 +14989,11 @@ setWaterFxInputsFromRuntimeState();
         if (guardsEl) guardsEl.checked = false;
         if (templateLevelInputEl) templateLevelInputEl.checked = false;
         if (bridge2LevelInputEl) bridge2LevelInputEl.checked = false;
+        if (bridgeDevLevelInputEl) bridgeDevLevelInputEl.checked = false;
         ballCamAuto = true;
         templateLevelEnabled = false;
         bridge2LevelEnabled = false;
+        bridgeDevLevelEnabled = false;
         setFpsCounterEnabled(false);
         setDevWaterFxEnabled(true);
         applyWaterFxFromSettingsUi(false);
@@ -14348,6 +15086,13 @@ setWaterFxInputsFromRuntimeState();
         } else {
             if (bridge2LevelInputEl) bridge2LevelInputEl.checked = false;
             bridge2LevelEnabled = false;
+        }
+        if (o.bdl != null) {
+            if (bridgeDevLevelInputEl) bridgeDevLevelInputEl.checked = !!o.bdl;
+            bridgeDevLevelEnabled = !!o.bdl;
+        } else {
+            if (bridgeDevLevelInputEl) bridgeDevLevelInputEl.checked = false;
+            bridgeDevLevelEnabled = false;
         }
         if (bridge2LevelEnabled && templateLevelEnabled) {
             templateLevelEnabled = false;
@@ -14468,6 +15213,8 @@ initEditor({
     createBrickAngledQuat,
     createEditorTrench,
     removeEditorTrench,
+    setEditorTrenchWater,
+    setAllEditorTrenchWater,
     createEditorDecorShrub,
     createEditorDecorTree,
     createEditorDecorBanner,
@@ -14805,21 +15552,22 @@ const DIFFICULTIES = {
         ammo: [8, 6, 2, 1, 120, 4, 0, 0, 0], knights: 8, disarm: false,
         c1: '#ef4444', c2: '#991b1b'
     },
-    extreme: {
-        name: 'Extreme Destruction', emoji: '\uD83D\uDCA5',
-        blurb: '10\u00d7 cannon & explosive ammo, 5\u00d7 mortars and a bottomless minigun. Ten armed knights. Flatten everything \u2014 no mercy, no limits.',
-        ammo: [120, 100, 30, 10, 2000, 30, 0, 0, 0], knights: 10, disarm: false,
-        c1: '#a855f7', c2: '#6b21a8', wide: true
-    },
     modern: {
         name: 'Modern Warfare', emoji: '\uD83C\uDF96\uFE0F',
         blurb: 'Ditch the catapults. Three FPV strike drones, a precision sniper, 300 minigun rounds, four bouncing grenades and two cluster bombs. Six armed defenders await.',
         ammo: [0, 0, 0, 0, 300, 8, 3, 4, 2], knights: 6, disarm: false,
         c1: '#22d3ee', c2: '#0c4a6e', wide: true,
         statsLine: 'Minigun \u00d7300 \u00b7 Sniper \u00d78 \u00b7 FPV Drone \u00d73 \u00b7 Grenade \u00d74 \u00b7 Cluster \u00d72'
+    },
+    extreme: {
+        name: 'Extreme Destruction', emoji: '\uD83D\uDCA5',
+        blurb: 'Every weapon. No limits. Cannons, explosives, mortars, minigun, sniper, drones, grenades, cluster bombs — the lot. Twelve armed defenders. Game ends when the last one falls.',
+        ammo: [60, 80, 30, 20, 2000, 20, 4, 8, 4], knights: 12, disarm: false,
+        c1: '#a855f7', c2: '#6b21a8', wide: true, killWin: true,
+        statsLine: 'Cannon \u00d780 \u00b7 Explosive \u00d730 \u00b7 Mortar \u00d720 \u00b7 Minigun \u00d72000 \u00b7 Sniper \u00d720 \u00b7 Drone \u00d74 \u00b7 Grenade \u00d78 \u00b7 Cluster \u00d74'
     }
 };
-const DIFF_ORDER = ['squire', 'knight', 'warlord', 'extreme', 'modern'];
+const DIFF_ORDER = ['squire', 'knight', 'warlord', 'modern', 'extreme'];
 
 function difficultyName(key) { return DIFFICULTIES[key] ? DIFFICULTIES[key].name : key; }
 
@@ -15759,44 +16507,48 @@ function spawnScorePopup(worldX, worldY, worldZ, text, cls) {
     }, { once: true });
 }
 const TOWER_GUARD_TAUNTS = [
-    'Missed. Surprised?',
-    'Oh brilliant aim. Really.',
-    'My grandmother throws harder.',
-    'Is that ALL you\'ve got?',
-    'Do carry on, this is hilarious.',
-    'I felt that. I lied.',
-    "'Tis but a scratch. Again.",
-    'Still here, shockingly.',
-    'Lovely shot. Wrong wall though.',
-    'You missed. Shocking.',
-    'Tremendous. Truly. No.',
-    'Retraining might help.',
-    'Five stars. Zero hits.',
-    'Oh very dramatic. Nothing happened.',
-    'Peasant with a cannon. Classic.',
-    'Massive pay cuts after this.'
+    'Brilliant. You missed the entire castle.',
+    'Oh good, a cannon. Very dramatic.',
+    'Is that your best, or a warm-up?',
+    'Right, I\'ll just stand here then.',
+    'Lovely trajectory. Shame about the aim.',
+    'You know walls don\'t dodge, yeah?',
+    'We\'ve got all day. You haven\'t.',
+    'That\'s going on your permanent record.',
+    'Structural damage: zero. Embarrassment: high.',
+    'Do carry on. I\'ve got snacks.',
+    'Bold strategy. Very bold. Very wrong.',
+    'The wall sends its regards.',
+    'Technically, that\'s called a miss.',
+    'I\'d clap but I\'m holding a bow.',
+    'Statistically, you\'ll hit something eventually.',
+    'Oh very dramatic. Nothing moved.',
+    'Top tier siege work. Truly.',
+    'I\'ve seen better aim from a falling trebuchet.',
+    'You had one job.',
+    'At this rate we\'ll all retire naturally.'
 ];
 const DRONE_FEAR_TAUNTS = [
-    'RUN AWAAAAY!!',
-    'It\'s just a model!',
-    "'TIS BUT A DRONE!",
-    'WE ARE THE KNIGHTS WHO SAY RUN!!',
-    'Father was a hamster!',
-    'Not dead yet... close though',
-    'BEING REPRESSED!!',
-    'None shall pass... bye!',
-    'Bite your ankles off!!',
-    'It\'s a witch!! ...RUN!',
-    'No one expects THIS!!',
-    '...much rejoicing. yaay.',
-    'Brave Sir Robin ran... SAME!!',
-    'FLESH WOUND PREFERRED!!',
-    'We\'ve got one!! RUN!!',
-    'Fetchez la vache!!',
-    'It\'s got huge... RUN!!',
-    'AIIIEEEE!!',
-    'What is your quest?! AWAY!!',
-    'Shrubbery!! I mean, RUN!!',
+    'THAT IS NOT A BIRD—',
+    'I WANT TO SPEAK TO THE KING—',
+    'ABORT. ABORT EVERYTHING—',
+    'No no no no no no—',
+    'WELL THIS IS UNACCEPTABLE—',
+    'I DID NOT SIGN UP FOR THIS—',
+    'OHH IT\'S FOLLOWING ME—',
+    'STRATEGICALLY RETREATING—',
+    'Right. I am OFF—',
+    'WHY DOES IT HAVE EYES—',
+    'EVERY MAN FOR HIMSELF—',
+    'THAT IS CHEATING THAT IS—',
+    'I QUIT I QUIT I QUIT—',
+    'WHERE IS HR WHEN YOU NEED THEM—',
+    'NOT IN THE JOB DESCRIPTION—',
+    'I AM HAVING A TERRIBLE DAY—',
+    'INCOMING EVERYTHING—',
+    'RIGHT THAT\'S IT I\'M MOVING COUNTRY—',
+    'Oh for the love of — RUN—',
+    'GET IT AWAY FROM ME—',
 ];
 const DRONE_FEAR_RADIUS  = 28;   // m - NPCs spot the drone
 const DRONE_CRAWL_RADIUS =  8;   // m - NPCs dive for cover
@@ -16679,6 +17431,63 @@ function animate() {
         }
     }
 
+    // Bridge-specific support scan. The castle scan is disabled while the
+    // bridge stage is active, so sleeping bridge bricks that lost their
+    // support can hover. Run a cheap throttled scan on bridge bricks only.
+    const shouldRunBridgeSupportScan = bridgeStageActive
+        && _frameCount > 180
+        && (_frameCount % (supportScanInterval * 2) === 0)
+        && (_frameCount - _lastDisturbFrame < supportScanActiveWindow)
+        && !_mobilePerfEmergency;
+    if (shouldRunBridgeSupportScan) {
+        const bridgeBricks = getStoryRoleBricks('bridge');
+        const GROUND_Y    = BS.h * 0.55;
+        const CHECK_XZ    = BS.w * 0.75;
+        const CHECK_DY_LO = 0.05;
+        const CHECK_DY_HI = BS.h * 1.4;
+        _grid.clear();
+        for (let i = 0; i < bridgeBricks.length; i++) {
+            const p = bridgeBricks[i].body.position;
+            const k = _cellKeyXYZ(Math.floor(p.x / _GRID_CELL), Math.floor(p.y / _GRID_CELL), Math.floor(p.z / _GRID_CELL));
+            let arr = _grid.get(k);
+            if (!arr) { arr = []; _grid.set(k, arr); }
+            arr.push(i);
+        }
+        let woken = 0;
+        const BUDGET = isMobileProfile ? 8 : 18;
+        for (const b of bridgeBricks) {
+            if (b.body.sleepState === 0) continue;
+            const by = b.body.position.y;
+            if (by < GROUND_Y) continue;
+            const bx = b.body.position.x;
+            const bz = b.body.position.z;
+            const ccx = Math.floor(bx / _GRID_CELL), ccy = Math.floor(by / _GRID_CELL), ccz = Math.floor(bz / _GRID_CELL);
+            let supported = false;
+            for (let dcx = -1; dcx <= 1 && !supported; dcx++)
+            for (let dcy = -1; dcy <= 1 && !supported; dcy++)
+            for (let dcz = -1; dcz <= 1 && !supported; dcz++) {
+                const arr = _grid.get(_cellKeyXYZ(ccx + dcx, ccy + dcy, ccz + dcz));
+                if (!arr) continue;
+                for (let j = 0; j < arr.length; j++) {
+                    const other = bridgeBricks[arr[j]];
+                    if (other === b) continue;
+                    if (other.body.mass > 0 && other.body.sleepState !== 2) continue;
+                    const oy = other.body.position.y;
+                    const dy = by - oy;
+                    if (dy < CHECK_DY_LO || dy > CHECK_DY_HI) continue;
+                    const dx = Math.abs(bx - other.body.position.x);
+                    const dz = Math.abs(bz - other.body.position.z);
+                    if (dx <= CHECK_XZ && dz <= CHECK_XZ) { supported = true; break; }
+                }
+            }
+            if (!supported) {
+                b.body.wakeUp();
+                woken++;
+                if (woken >= BUDGET) break;
+            }
+        }
+    }
+
     // Cluster stability (cantilever / top-heavy collapse) check.
     // The per-brick check above only asks "is *something* underneath me" � so a
     // thin column can appear to "support" a big overhanging mass even though, in
@@ -17193,33 +18002,49 @@ function animate() {
         if (post) {
             post.fistCooldown = Math.max(0, post.fistCooldown - dt);
             post.fistTimer = Math.max(0, post.fistTimer - dt);
-            post.phaseTimer -= dt;
-            if (post.phaseTimer <= 0) {
-                post.isPeeking = !post.isPeeking;
-                post.phaseTimer = post.isPeeking
-                    ? (1.0 + Math.random() * 1.0)
-                    : (1.6 + Math.random() * 2.2);
-                if (post.isPeeking) {
-                    const toPlayer = Math.atan2(camera.position.x - post.cx, camera.position.z - post.cz);
-                    post.targetAngle = toPlayer + (Math.random() - 0.5) * 1.05;
+            post.diveCooldown = Math.max(0, post.diveCooldown - dt);
+
+            const angDist = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+            const toPlayer = Math.atan2(camera.position.x - post.cx, camera.position.z - post.cz);
+
+            // Deliberate cover rhythm: stay tucked behind a merlon, then lean out
+            // through the adjacent crenel gap to loose an arrow before ducking back.
+            post.stateTimer -= dt;
+            if (post.stateTimer <= 0) {
+                if (post.state === 'hide') {
+                    // Rise and lean toward whichever gap faces the player.
+                    post.state = 'peek';
+                    post.stateTimer = 1.2 + Math.random() * 1.2;
+                    const gapA = post.coverAngle + post.gapStep;
+                    const gapB = post.coverAngle - post.gapStep;
+                    post.peekAngle = angDist(gapA, toPlayer) <= angDist(gapB, toPlayer) ? gapA : gapB;
+                } else {
+                    // Duck back into cover; sometimes dive to a better merlon.
+                    post.state = 'hide';
+                    post.stateTimer = 2.4 + Math.random() * 3.4;
+                    if (post.diveCooldown <= 0 && post.merlonAngles.length > 1 && Math.random() < 0.5) {
+                        let best = post.coverAngle;
+                        for (const m of post.merlonAngles) {
+                            if (angDist(m, toPlayer) < angDist(best, toPlayer)) best = m;
+                        }
+                        post.coverAngle = best;
+                        post.diveCooldown = 6.0 + Math.random() * 7.0;
+                    }
                 }
             }
 
-            post.repositionTimer -= dt;
-            if (post.repositionTimer <= 0) {
-                const toPlayer = Math.atan2(camera.position.x - post.cx, camera.position.z - post.cz);
-                post.targetAngle = toPlayer + (Math.random() - 0.5) * 1.35;
-                post.repositionTimer = 3.2 + Math.random() * 3.8;
-            }
+            post.isPeeking = post.state === 'peek';
+            post.targetAngle = post.isPeeking ? post.peekAngle : post.coverAngle;
 
+            // Slow, deliberate rotation around the tower — no more twitchy spins.
             const aDelta = Math.atan2(Math.sin(post.targetAngle - post.angle), Math.cos(post.targetAngle - post.angle));
-            post.angle += aDelta * Math.min(1, dt * 2.3);
+            post.angle += aDelta * Math.min(1, dt * 1.15);
 
             const radiusTarget = post.isPeeking ? post.exposedRadius : post.coverRadius;
             const tx = post.cx + Math.sin(post.angle) * radiusTarget;
             const tz = post.cz + Math.cos(post.angle) * radiusTarget;
-            gp.x = THREE.MathUtils.lerp(gp.x, tx, Math.min(1, dt * 5.2));
-            gp.z = THREE.MathUtils.lerp(gp.z, tz, Math.min(1, dt * 5.2));
+            gp.x = THREE.MathUtils.lerp(gp.x, tx, Math.min(1, dt * 2.6));
+            gp.z = THREE.MathUtils.lerp(gp.z, tz, Math.min(1, dt * 2.6));
 
             // Safe zone on tower tops: clamp to a stable ring so guards avoid
             // edge jitter from repeated collision pushes.
@@ -17232,8 +18057,9 @@ function animate() {
                 gp.z = post.cz + offZ * scl;
             }
 
-            const hideDrop = post.isPeeking ? 0.0 : 0.16;
-            gp.y = THREE.MathUtils.lerp(gp.y, post.baseY - hideDrop, Math.min(1, dt * 7.0));
+            // Crouch behind the merlon while hidden; rise to fire when peeking.
+            const hideDrop = post.isPeeking ? 0.0 : 0.22;
+            gp.y = THREE.MathUtils.lerp(gp.y, post.baseY - hideDrop, Math.min(1, dt * 4.0));
 
             // Occasional fist-wave taunt while visible; sparse by design.
             if (post.isPeeking && post.fistCooldown <= 0 && post.fistTimer <= 0) {
@@ -17337,7 +18163,9 @@ function animate() {
         const dz = targetZ - gp.z;
         npc.group.rotation.y = Math.atan2(dx, dz);
         npc.arrowTimer += dt;
-        if (npc.arrowTimer >= ARROW_INTERVAL) {
+        // Only loose an arrow while leaning out of cover — tucked guards hold fire.
+        const canShoot = !post || post.isPeeking;
+        if (npc.arrowTimer >= ARROW_INTERVAL && canShoot) {
             npc.arrowTimer = 0;
             if (droneFlying) {
                 fireArrowAtDrone(npc);
@@ -18583,18 +19411,26 @@ function animate() {
     // impulse (gravity does the work) and towers/walls are collision-decoupled,
     // so a brick that turns out to still be supported simply settles back to
     // sleep within sleepTimeLimit. A per-scan budget bounds the worst case.
-    if (_doPropFrame && _awakeBrickPts.length > 0 && !mobileImpactBudgetMode && !bridgeStageActive) {
+    if (_doPropFrame && _awakeBrickPts.length > 0 && !mobileImpactBudgetMode) {
         const RXZ = _WAKE_PROP_RXZ;
+        // Bridge spans are fragile: allow undermined bricks to fall, but cap
+        // the propagation budget much lower so a single moving brick can't
+        // cascade-wake the whole deck.
+        const isBridgeActive = bridgeStageActive;
+        const propBudget = isBridgeActive ? Math.min(6, wakePropBudget) : wakePropBudget;
         let woken = 0;
-        for (const b of castleScanBricks) {
+        for (const b of frameActiveBricks) {
             if (b.body.sleepState === 0) continue;   // already awake
             const bp = b.body.position;
             const wakeWaterY = getWaterSurfaceYAtXZ(bp.x, bp.z);
             if (wakeWaterY != null && bp.y <= wakeWaterY + 0.45) continue;
             for (let i = 0; i < _awakeBrickPts.length; i += 4) {
                 // Only a brick from the SAME structure can be undermined by this
-                // moving brick � wall debris must not knock the decoupled towers down.
+                // moving brick — wall debris must not knock the decoupled towers down.
                 if (_awakeBrickPts[i + 3] !== b.grp) continue;
+                // Bridge propagation: only bridge bricks can undermine bridge
+                // bricks, and we keep the budget tiny.
+                if (isBridgeActive && b.storyRole !== 'bridge') continue;
                 // Must sit ABOVE the moving brick (its support was below it).
                 const dy = bp.y - _awakeBrickPts[i + 1];
                 if (dy < _WAKE_PROP_DY_MIN || dy > _WAKE_PROP_DY_MAX) continue;
@@ -18606,7 +19442,7 @@ function animate() {
                 woken++;
                 break;
             }
-            if (woken >= wakePropBudget) break;   // bound worst-case work
+            if (woken >= propBudget) break;   // bound worst-case work
         }
     }
 
@@ -19136,7 +19972,8 @@ function animate() {
     }
 
     const waterAnimStart = _perfDebugEnabled ? performance.now() : 0;
-    if (WATER_SYSTEM_ENABLED && devWaterFxEnabled && levelWaterPlanes.length) {
+    if (WATER_SYSTEM_ENABLED && devWaterFxEnabled
+        && (levelWaterPlanes.length || bridgeLibraryWaterSurfaces.length)) {
         // Scroll water UVs (three counter-moving normal layers).
         const waterDt = dt * WATER_MOTION_RATE;
         const waterT = performance.now() * 0.001 * WATER_MOTION_RATE;
