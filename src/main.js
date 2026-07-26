@@ -2763,16 +2763,16 @@ const castleBridgeBandCoverBodies = [];
 // tunnel that opens into a grand torch-lit chamber. One big rectangular hole
 // in the island colliders; the only opening is the stairwell mouth.
 const BUNKER = {
-    X1: 2, X2: 14,                          // chamber width
-    OPEN_Z1: 61, Z2: 84,                    // mouth at OPEN_Z1, far wall at Z2
-    OPEN_X1: 7, OPEN_X2: 9,                 // stairwell opening (courtyard hole)
-    OPEN_Z2: 66,                            // stairwell ramp end z
-    RAMP1_TOP: 0.0, RAMP1_BOT: -4.0,        // stairwell slope (z 61 -> 66)
-    TUNNEL_Z2: 72,                          // tunnel slope end z (-> FLOOR_Y)
+    X1: -14, X2: 14,                        // chamber width (under the great hall)
+    OPEN_Z1: 75, Z2: 93,                    // mouth z, far wall z
+    OPEN_X1: -1.5, OPEN_X2: 1.5,            // stairwell mouth (3 wide, hall floor)
+    OPEN_Z2: 81,                            // stairwell ramp end z
+    RAMP1_TOP: 0.0, RAMP1_BOT: -4.0,        // stairwell slope (z 75 -> 81)
+    TUNNEL_Z2: 86,                          // tunnel slope end z (-> chamber)
     FLOOR_Y: -6.4,                          // chamber floor
     CEIL_Y: -1.0,
-    TRAPDOOR_X: 8, TRAPDOOR_Z: 63.5,
-    THRONE_X: 4.6, THRONE_Z: 80,
+    TRAPDOOR_X: 0, TRAPDOOR_Z: 78,
+    THRONE_X: -11, THRONE_Z: 89.5,
     CEIL_COLLIDER_T: 0.6,
 };
 const BUNKER_COIN_TOTAL = 10, BUNKER_COIN_SCORE = 50, KING_BONUS_SCORE = 500;
@@ -2879,8 +2879,12 @@ addGround((BRIDGE_WATER_MIN_X + _MOX1) / 2, (_MOZ1 + _MOZ2) / 2, _MOX1 - BRIDGE_
 // 4. Right strip: mirror of the left.
 addGround((BRIDGE_WATER_MAX_X + 500) / 2, (_MOZ1 + _MOZ2) / 2, 500 - BRIDGE_WATER_MAX_X, _MOZ2 - _MOZ1);
 addGround((_MOX2 + BRIDGE_WATER_MAX_X) / 2, (_MOZ1 + _MOZ2) / 2, BRIDGE_WATER_MAX_X - _MOX2, _MOZ2 - _MOZ1, 'castle');
-// 5. Castle island (inside moat)
-addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1, 'castle');
+// 5. Castle island (inside moat): four strips around the King's Bunker descent
+// (the stairwell/tunnel/chamber cut through the island — no grass cap over it).
+addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + BUNKER.OPEN_Z1) / 2, _MIX2 - _MIX1, BUNKER.OPEN_Z1 - _MIZ1, 'castle');
+addGround((_MIX1 + _MIX2) / 2, (BUNKER.Z2 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - BUNKER.Z2, 'castle');
+addGround((_MIX1 + BUNKER.X1) / 2, (BUNKER.OPEN_Z1 + BUNKER.Z2) / 2, BUNKER.X1 - _MIX1, BUNKER.Z2 - BUNKER.OPEN_Z1, 'castle');
+addGround((BUNKER.X2 + _MIX2) / 2, (BUNKER.OPEN_Z1 + BUNKER.Z2) / 2, _MIX2 - BUNKER.X2, BUNKER.Z2 - BUNKER.OPEN_Z1, 'castle');
 
 // Seam underlays: the strips above abut edge-to-edge without shared vertices,
 // so float rounding leaves hairline cracks along the joins � visible as white
@@ -2915,6 +2919,13 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
     // Band left/right edges (under shore fill in bridge mode, solid in castle).
     seam(BRIDGE_WATER_MIN_X, (_BWZ1 + _BWZ2) / 2, SW, _BWZ2 - _BWZ1);
     seam(BRIDGE_WATER_MAX_X, (_BWZ1 + _BWZ2) / 2, SW, _BWZ2 - _BWZ1);
+    // King's Bunker descent edges — only where the island strips actually join
+    // (the hole itself stays uncovered or it would cap the stairwell).
+    const BKX1 = BUNKER.X1, BKX2 = BUNKER.X2;
+    seam((_MIX1 + BKX1) / 2, BUNKER.OPEN_Z1, BKX1 - _MIX1, SW, 'castle');
+    seam((BKX2 + _MIX2) / 2, BUNKER.OPEN_Z1, _MIX2 - BKX2, SW, 'castle');
+    seam((_MIX1 + BKX1) / 2, BUNKER.Z2, BKX1 - _MIX1, SW, 'castle');
+    seam((BKX2 + _MIX2) / 2, BUNKER.Z2, _MIX2 - BKX2, SW, 'castle');
 })();
 
 // === Solid physics ground with a carved-out moat trench ===
@@ -3021,7 +3032,7 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
             bunkerColliderBodies.push(body);
         };
         rampBody(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z1, B.OPEN_Z2, B.RAMP1_TOP, B.RAMP1_BOT);   // stairwell
-        rampBody(B.X1, B.X2, B.OPEN_Z2, B.TUNNEL_Z2, B.RAMP1_BOT, B.FLOOR_Y);             // tunnel
+        rampBody(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z2, B.TUNNEL_Z2, B.RAMP1_BOT, B.FLOOR_Y);   // tunnel
         bunkerColliderBodies.push(slab(B.X1, B.X2, B.TUNNEL_Z2, B.Z2, B.FLOOR_Y));        // chamber floor
         // Walls: chamber sides + far end, from below the floor up to y=0.
         const wallH = 0 - (B.FLOOR_Y - 0.6), wallCY = (B.FLOOR_Y - 0.6) / 2;
@@ -3034,21 +3045,22 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
             world.addBody(body);
             bunkerColliderBodies.push(body);
         };
-        wallBox(B.X1 - 0.15, (B.OPEN_Z2 + B.Z2) / 2, 0.3, B.Z2 - B.OPEN_Z2);   // west
-        wallBox(B.X2 + 0.15, (B.OPEN_Z2 + B.Z2) / 2, 0.3, B.Z2 - B.OPEN_Z2);   // east
-        wallBox((B.X1 + B.X2) / 2, B.Z2 + 0.15, B.X2 - B.X1 + 0.6, 0.3);       // far (north)
-        // Stairwell side walls + the chamber's south face beside the stairwell
-        const swH = 0 - (B.RAMP1_BOT - 0.6), swCY = (B.RAMP1_BOT - 0.6) / 2;
-        wallBox(B.OPEN_X1 - 0.15, (B.OPEN_Z1 + B.OPEN_Z2) / 2, 0.3, B.OPEN_Z2 - B.OPEN_Z1, swH, swCY);
-        wallBox(B.OPEN_X2 + 0.15, (B.OPEN_Z1 + B.OPEN_Z2) / 2, 0.3, B.OPEN_Z2 - B.OPEN_Z1, swH, swCY);
-        wallBox((B.X1 + B.OPEN_X1) / 2, B.OPEN_Z2 - 0.15, B.OPEN_X1 - B.X1, 0.3, swH, swCY);
-        wallBox((B.OPEN_X2 + B.X2) / 2, B.OPEN_Z2 - 0.15, B.X2 - B.OPEN_X2, 0.3, swH, swCY);
+        wallBox(B.X1 - 0.15, (B.TUNNEL_Z2 + B.Z2) / 2, 0.3, B.Z2 - B.TUNNEL_Z2);   // west
+        wallBox(B.X2 + 0.15, (B.TUNNEL_Z2 + B.Z2) / 2, 0.3, B.Z2 - B.TUNNEL_Z2);   // east
+        wallBox((B.X1 + B.X2) / 2, B.Z2 + 0.15, B.X2 - B.X1 + 0.6, 0.3);           // far (north)
+        // Tunnel side walls (both ramps) + the chamber's south face beside the
+        // tunnel — FULL chamber depth (the tunnel floor reaches FLOOR_Y at the
+        // chamber end; shorter walls leave a see-through strip at floor level).
+        wallBox(B.OPEN_X1 - 0.15, (B.OPEN_Z1 + B.TUNNEL_Z2) / 2, 0.3, B.TUNNEL_Z2 - B.OPEN_Z1);
+        wallBox(B.OPEN_X2 + 0.15, (B.OPEN_Z1 + B.TUNNEL_Z2) / 2, 0.3, B.TUNNEL_Z2 - B.OPEN_Z1);
+        wallBox((B.X1 + B.OPEN_X1) / 2, B.TUNNEL_Z2 - 0.15, B.OPEN_X1 - B.X1, 0.3);
+        wallBox((B.OPEN_X2 + B.X2) / 2, B.TUNNEL_Z2 - 0.15, B.X2 - B.OPEN_X2, 0.3);
         // Locked trapdoor cover over the mouth (removed from the world when opened)
         trapdoorBody = new CANNON.Body({
             mass: 0, material: brickPhysMat,
             shape: new CANNON.Box(new CANNON.Vec3((B.OPEN_X2 - B.OPEN_X1) / 2, 0.15, (B.OPEN_Z2 - B.OPEN_Z1) / 2)),
         });
-        trapdoorBody.position.set(B.TRAPDOOR_X, -0.10, B.TRAPDOOR_Z);   // top ~y=0.05
+        trapdoorBody.position.set(B.TRAPDOOR_X, 0.14, B.TRAPDOOR_Z);   // top ~y=0.29, flush with the hall floor
         world.addBody(trapdoorBody);
         bunkerColliderBodies.push(trapdoorBody);
     }
@@ -6174,20 +6186,46 @@ const woodPlankMat = new THREE.MeshStandardMaterial({
         castleSceneMeshes.push(piece);
     }
 
-    // Wooden great-hall floor over the rear half, raised one plank thickness.
+    // Wooden great-hall floor over the rear half, raised one plank thickness —
+    // built as boxes around the King's Bunker stairwell mouth so the hatch sits
+    // cleanly in the wood.
     const woodTex = woodPlankTex.clone();
     woodTex.needsUpdate = true;
     woodTex.repeat.set(wX / 2.4, (wZ / 2) / 2.4);
     const hallMat = new THREE.MeshStandardMaterial({
         map: woodTex, roughness: 0.9, metalness: 0.0, color: 0xb89066
     });
-    const hallZ0 = czC, hallZ1 = z1;          // rear half
-    const hallW = wX - 1.0, hallD = hallZ1 - hallZ0 - 0.5;
-    const hall = new THREE.Mesh(new THREE.BoxGeometry(hallW, 0.24, hallD), hallMat);
-    hall.position.set(cxC, 0.12, (hallZ0 + hallZ1) / 2);
-    hall.receiveShadow = true; hall.castShadow = true;
-    scene.add(hall);
-    castleSceneMeshes.push(hall);
+    const hallZ0 = czC, hallZ1 = z1 - 0.5;    // rear half (0.5m stone margin at the wall)
+    const hallX0 = x0 + 0.5, hallX1 = x1 - 0.5;
+    const hallRects = [
+        [hallX0, BUNKER.OPEN_X1, hallZ0, hallZ1],
+        [BUNKER.OPEN_X2, hallX1, hallZ0, hallZ1],
+        [BUNKER.OPEN_X1, BUNKER.OPEN_X2, hallZ0, BUNKER.OPEN_Z1],
+        [BUNKER.OPEN_X1, BUNKER.OPEN_X2, BUNKER.OPEN_Z2, hallZ1],
+    ];
+    for (const [hx0, hx1, hz0, hz1] of hallRects) {
+        const hw = hx1 - hx0, hd = hz1 - hz0;
+        if (hw <= 0 || hd <= 0) continue;
+        const piece = new THREE.Mesh(new THREE.BoxGeometry(hw, 0.24, hd), hallMat);
+        piece.position.set((hx0 + hx1) / 2, 0.12, (hz0 + hz1) / 2);
+        piece.receiveShadow = true; piece.castShadow = true;
+        scene.add(piece);
+        castleSceneMeshes.push(piece);
+    }
+    // Dark wooden rim framing the stairwell mouth (trim, no gameplay role)
+    const rimMat = new THREE.MeshStandardMaterial({ map: woodPlankTex, roughness: 0.8, color: 0x6b4a28 });
+    const rimY = 0.26;
+    for (const [rx, rz, rw, rd] of [
+        [BUNKER.OPEN_X1 - 0.15, BUNKER.TRAPDOOR_Z, 0.3, BUNKER.OPEN_Z2 - BUNKER.OPEN_Z1 + 0.6],
+        [BUNKER.OPEN_X2 + 0.15, BUNKER.TRAPDOOR_Z, 0.3, BUNKER.OPEN_Z2 - BUNKER.OPEN_Z1 + 0.6],
+        [BUNKER.TRAPDOOR_X, BUNKER.OPEN_Z1 - 0.15, BUNKER.OPEN_X2 - BUNKER.OPEN_X1 + 0.6, 0.3],
+        [BUNKER.TRAPDOOR_X, BUNKER.OPEN_Z2 + 0.15, BUNKER.OPEN_X2 - BUNKER.OPEN_X1 + 0.6, 0.3],
+    ]) {
+        const rim = new THREE.Mesh(new THREE.BoxGeometry(rw, 0.1, rd), rimMat);
+        rim.position.set(rx, rimY, rz);
+        scene.add(rim);
+        castleSceneMeshes.push(rim);
+    }
 })();
 
 // === The King's Bunker: stairwell descent, tunnel, grand chamber ===
@@ -6234,19 +6272,20 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
         wallGeos.push(g);
     };
     const chamberH = 0 - (B.FLOOR_Y - 0.2), chamberCY = (B.FLOOR_Y - 0.2) / 2;
-    const tunnelLen = B.Z2 - B.OPEN_Z2, tunnelCZ = (B.OPEN_Z2 + B.Z2) / 2;
-    place(lumpPanel(tunnelLen, chamberH), B.X1, chamberCY, tunnelCZ, Math.PI / 2);   // west
-    place(lumpPanel(tunnelLen, chamberH), B.X2, chamberCY, tunnelCZ, -Math.PI / 2);  // east
+    const chLen = B.Z2 - B.TUNNEL_Z2, chCZ = (B.TUNNEL_Z2 + B.Z2) / 2;
+    place(lumpPanel(chLen, chamberH), B.X1, chamberCY, chCZ, Math.PI / 2);          // west
+    place(lumpPanel(chLen, chamberH), B.X2, chamberCY, chCZ, -Math.PI / 2);         // east
     place(lumpPanel(B.X2 - B.X1, chamberH), (B.X1 + B.X2) / 2, chamberCY, B.Z2, Math.PI); // far (north)
-    // stairwell lining + chamber south face beside the stairwell
-    const swH = 0.1 - (B.RAMP1_BOT - 0.2), swCY = (0.1 + B.RAMP1_BOT - 0.2) / 2, swCZ = (B.OPEN_Z1 + B.OPEN_Z2) / 2;
-    place(lumpPanel(B.OPEN_Z2 - B.OPEN_Z1, swH), B.OPEN_X1, swCY, swCZ, Math.PI / 2);
-    place(lumpPanel(B.OPEN_Z2 - B.OPEN_Z1, swH), B.OPEN_X2, swCY, swCZ, -Math.PI / 2);
-    place(lumpPanel(B.OPEN_X1 - B.X1, swH), (B.X1 + B.OPEN_X1) / 2, swCY, B.OPEN_Z2, Math.PI);
-    place(lumpPanel(B.X2 - B.OPEN_X2, swH), (B.OPEN_X2 + B.X2) / 2, swCY, B.OPEN_Z2, Math.PI);
-    // stud boulders pressed against the walls
+    // tunnel lining (both ramps) + chamber south face beside the tunnel — all
+    // full chamber depth (see the collider note; swH would leave a gap strip).
+    const tunLen = B.TUNNEL_Z2 - B.OPEN_Z1, tunCZ = (B.OPEN_Z1 + B.TUNNEL_Z2) / 2;
+    place(lumpPanel(tunLen, chamberH), B.OPEN_X1, chamberCY, tunCZ, Math.PI / 2);
+    place(lumpPanel(tunLen, chamberH), B.OPEN_X2, chamberCY, tunCZ, -Math.PI / 2);
+    place(lumpPanel(B.OPEN_X1 - B.X1, chamberH), (B.X1 + B.OPEN_X1) / 2, chamberCY, B.TUNNEL_Z2, Math.PI);
+    place(lumpPanel(B.X2 - B.OPEN_X2, chamberH), (B.OPEN_X2 + B.X2) / 2, chamberCY, B.TUNNEL_Z2, Math.PI);
+    // stud boulders pressed against the chamber walls
     for (let i = 0; i < 26; i++) {
-        const sz = B.OPEN_Z2 + 0.5 + hash2(i, 2) * (B.Z2 - B.OPEN_Z2 - 1);
+        const sz = B.TUNNEL_Z2 + 0.5 + hash2(i, 2) * (B.Z2 - B.TUNNEL_Z2 - 1);
         const sy = B.FLOOR_Y + 0.4 + hash2(i, 3) * (chamberH - 1.4);
         const r = 0.10 + hash2(i, 4) * 0.18;
         const g = new THREE.DodecahedronGeometry(r, 0);
@@ -6295,17 +6334,17 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
 
     // Mine-shaft support frames down the tunnel (posts + lintels, dark wood)
     const supportMat = new THREE.MeshStandardMaterial({ color: 0x3a2a18, roughness: 0.9 });
-    for (const sz of [67.5, 70, 72.5]) {
+    for (const sz of [77, 80, 83, 85]) {
         const fy = bunkerFloorYAt(sz);
         const postH = (B.CEIL_Y + 0.05) - fy;
-        for (const px of [B.X1 + 0.35, B.X2 - 0.35]) {
+        for (const px of [B.OPEN_X1 + 0.2, B.OPEN_X2 - 0.2]) {
             const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, postH, 0.18), supportMat);
             post.position.set(px, fy + postH / 2, sz);
             scene.add(post);
             castleSceneMeshes.push(post);
         }
-        const lintel = new THREE.Mesh(new THREE.BoxGeometry(B.X2 - B.X1 - 0.4, 0.2, 0.2), supportMat);
-        lintel.position.set((B.X1 + B.X2) / 2, B.CEIL_Y - 0.05, sz);
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(B.OPEN_X2 - B.OPEN_X1 - 0.1, 0.2, 0.2), supportMat);
+        lintel.position.set(B.TRAPDOOR_X, B.CEIL_Y - 0.05, sz);
         scene.add(lintel);
         castleSceneMeshes.push(lintel);
     }
@@ -6319,9 +6358,9 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
 
     // Wall torches: emissive-look flame cones + a fixed pool of point lights.
     const torchSpots = [
-        { x: B.OPEN_X2 - 0.28, y: -2.3, z: 64, nx: -1, nz: 0 },   // stairwell east wall
-        { x: B.X1 + 0.28, y: -4.4, z: 76, nx: 1, nz: 0 },         // chamber west
-        { x: B.X2 - 0.28, y: -4.4, z: 81, nx: -1, nz: 0 },        // chamber east
+        { x: B.OPEN_X2 - 0.28, y: -2.3, z: 78.5, nx: -1, nz: 0 },     // stairwell east wall
+        { x: B.X1 + 0.28, y: -4.4, z: 88, nx: 1, nz: 0 },             // chamber west (by the throne)
+        { x: 8, y: -4.4, z: B.Z2 - 0.28, nx: 0, nz: -1 },             // chamber north wall
     ];
     const torchCount = isMobileProfile ? 2 : 3;
     const bracketMat = new THREE.MeshStandardMaterial({ color: 0x2b2118, roughness: 0.9 });
@@ -6364,7 +6403,7 @@ const mobileInteractBtn = document.getElementById('mobileInteractBtn');
 (function buildTrapdoor() {
     const B = BUNKER;
     const pivot = new THREE.Group();
-    pivot.position.set(B.OPEN_X1, 0.12, B.TRAPDOOR_Z);   // hinge along the west edge
+    pivot.position.set(B.OPEN_X1, 0.30, B.TRAPDOOR_Z);   // hinge, west edge at hall level
     scene.add(pivot);
     castleSceneMeshes.push(pivot);
 
@@ -6444,7 +6483,7 @@ const coinTimerEl = document.getElementById('coinTimer');
     const spots = [];
     for (const a of [0, 60, 120, 180, 240, 300]) spots.push([TX + Math.cos(a * Math.PI / 180) * 1.6, TZ + Math.sin(a * Math.PI / 180) * 1.6]);
     // A loose trail back toward the tunnel mouth, all clear of the walls.
-    spots.push([8.5, 74.5], [5.5, 75.5], [10.5, 78.5], [7.5, 81.5]);
+    spots.push([-6, 88], [-2, 90.5], [3, 88.5], [8, 89.5]);
     for (const [cx, cz] of spots) {
         const coin = new THREE.Mesh(coinGeo, coinMat);
         coin.position.set(cx, BUNKER.FLOOR_Y + 0.5, cz);
@@ -6492,6 +6531,7 @@ function updateBunkerPickups(dt) {
             bunkerCoinsCollected++;
             score += BUNKER_COIN_SCORE;
             updateUI();
+            playCoinSound();
             spawnScorePopup(p.mesh.position.x, p.mesh.position.y + 0.4, p.mesh.position.z, '+' + BUNKER_COIN_SCORE, null);
             updateCoinHud();
         }
@@ -6585,6 +6625,12 @@ window.__bunkerTest = {
         world.raycastClosest(new CANNON.Vec3(x, fromY, z), new CANNON.Vec3(x, -30, z),
             { collisionFilterMask: -1, skipBackfaces }, rc);
         return rc.hasHit ? rc.hitPointWorld.y : null;
+    },
+    probeRay: (fx, fy, fz, tx, ty, tz) => {
+        const rc = new CANNON.RaycastResult();
+        world.raycastClosest(new CANNON.Vec3(fx, fy, fz), new CANNON.Vec3(tx, ty, tz),
+            { collisionFilterMask: -1, skipBackfaces: true }, rc);
+        return rc.hasHit ? { p: rc.hitPointWorld.toArray().map(v => +v.toFixed(2)) } : null;
     },
     blast: (x, y, z, r = 4) => triggerBlast(new THREE.Vector3(x, y, z), r),
     aim: (y, p) => { yaw = y; pitch = p; },
@@ -10581,7 +10627,6 @@ const KING_PUNCH_DUR = 0.45;
         throneGroup.add(finial);
     }
     throneGroup.position.set(BUNKER.THRONE_X, BUNKER.FLOOR_Y + 0.5, BUNKER.THRONE_Z);
-    throneGroup.rotation.y = Math.PI / 2;   // throne model faces +x; turn it to face the entrance (-z)
     scene.add(throneGroup);
     castleSceneMeshes.push(throneGroup);
 
@@ -10662,7 +10707,7 @@ function updateKingPose(dt) {
     }
     // Ride the throne (it floats during the flood).
     king.group.position.set(throneGroup.position.x, throneGroup.position.y, throneGroup.position.z);
-    king.group.rotation.y = Math.PI;   // face the entrance (south, -z)
+    king.group.rotation.y = Math.PI / 2;   // face the tunnel mouth (east, +x)
     // Seated: thighs forward, feet comically dangling; gentle breathing.
     king.anim.legL.rotation.x = -0.9;
     king.anim.legR.rotation.x = -0.9;
@@ -12306,6 +12351,31 @@ function playCannonFire(weaponIdx = currentWeapon) {
     const crackHP = ctx.createBiquadFilter(); crackHP.type = 'highpass'; crackHP.frequency.value = 1800;
     const crackGain = ctx.createGain(); crackGain.gain.value = 1.6;
     crackSrc.connect(crackHP); crackHP.connect(crackGain); crackGain.connect(ctx.destination); crackSrc.start(now);
+}
+
+// Classic two-note coin "bling" (B5 -> E6, square wave, fast attack/decay) —
+// Mario-esque, synthesized so no sample is needed. Plays on both platforms.
+function playCoinSound() {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(isMobileProfile ? 0.10 : 0.14, now);
+    master.connect(ctx.destination);
+    const note = (freq, t0, dur) => {
+        const o = ctx.createOscillator();
+        o.type = 'square';
+        o.frequency.setValueAtTime(freq, t0);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(1, t0 + 0.008);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+        o.connect(g);
+        g.connect(master);
+        o.start(t0);
+        o.stop(t0 + dur + 0.02);
+    };
+    note(988, now, 0.09);          // B5
+    note(1319, now + 0.07, 0.40);  // E6, held
 }
 
 function playDrawbridgeCreak(amount = 0.6, speedNorm = 0.5) {
