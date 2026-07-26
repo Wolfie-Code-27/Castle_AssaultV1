@@ -3806,6 +3806,7 @@ function isCastleMoatWaterActive() {
     return WATER_SYSTEM_ENABLED
     && CASTLE_MOAT_WATER_ENABLED
         && castleStageActive
+        && !castleMoatDrained
         && (typeof storyCastleSuppressed === 'undefined' || !storyCastleSuppressed);
 }
 
@@ -3851,7 +3852,7 @@ function npcGroundY(x, z) {
     if (isInStoryBridgeTrenchXZ(x, z, 0)) return STORY_BRIDGE_TRENCH_FLOOR_Y;
     const castleStageActive = !storyModeEnabled || storyStage === 2 || storyStage === 3;
     if (castleStageActive && isInCastleMoatRingXZ(x, z, 0)) {
-        if (WATER_SYSTEM_ENABLED && CASTLE_MOAT_WATER_ENABLED) return WATER_Y;
+        if (!castleMoatDrained && WATER_SYSTEM_ENABLED && CASTLE_MOAT_WATER_ENABLED) return WATER_Y;
         return -MOAT_DEPTH + 0.15;
     }
     if (!WATER_SYSTEM_ENABLED) return 0;
@@ -5031,8 +5032,9 @@ castleMoatWaterGeo.scale(1, -1, 1);
 if (WATER_SYSTEM_ENABLED && (CASTLE_MOAT_WATER_ENABLED || SIMPLE_MURKY_WATER_OVERLAY)) {
     // Match bridge layering: keep underlay/ripple depth at gameplay water Y
     // and render the visible Water shader surface at SIMPLE_WATER_SURFACE_Y.
-    addWaterShapePlane(castleMoatWaterGeo, 0, 0, 'castle', WATER_Y);
-    addStoryBridgeVisualWaterCap(castleMoatWaterGeo, SIMPLE_WATER_SURFACE_Y, 0, 0, castleSceneMeshes, 'castle', true);
+    // Handles captured for the King's Bunker moat-drain sequence.
+    castleMoatWaterPlane = addWaterShapePlane(castleMoatWaterGeo, 0, 0, 'castle', WATER_Y);
+    castleMoatWaterCap = addStoryBridgeVisualWaterCap(castleMoatWaterGeo, SIMPLE_WATER_SURFACE_Y, 0, 0, castleSceneMeshes, 'castle', true);
 }
 initWaterImpactRipples();
 
@@ -9705,10 +9707,10 @@ function setStoryCastleSuppressed(suppressed) {
         }
     }
 
-    if (typeof moatReflector !== 'undefined' && moatReflector) moatReflector.visible = !suppressed;
+    if (typeof moatReflector !== 'undefined' && moatReflector) moatReflector.visible = !suppressed && !castleMoatDrained;
     for (const wp of levelWaterPlanes) {
         if (wp.levelRole !== 'castle') continue;
-        const showLevelWater = !suppressed && devWaterFxEnabled;
+        const showLevelWater = !suppressed && devWaterFxEnabled && !(wp === castleMoatWaterPlane && castleMoatDrained);
         if (wp.underlay) wp.underlay.visible = showLevelWater;
         if (wp.ripple) wp.ripple.visible = showLevelWater;
         if (wp.ripple2) wp.ripple2.visible = showLevelWater;
@@ -9724,16 +9726,17 @@ function setStoryCastleSuppressed(suppressed) {
         if (m) m.visible = !suppressed;
     }
     // Castle water caps / library surfaces live in castleSceneMeshes too
-    // (force-shown just above) � re-apply the dev water toggle last.
+    // (force-shown just above) � re-apply the dev water toggle last. A drained
+    // moat (King's Bunker switch) stays drained across stage toggles.
     for (const wm of bridgeLibraryWaterSurfaces) {
         if (!wm) continue;
         if ((wm.userData?.waterRole || 'bridge') !== 'castle') continue;
-        wm.visible = !suppressed && devWaterFxEnabled;
+        wm.visible = !suppressed && devWaterFxEnabled && !castleMoatDrained;
     }
     for (const cap of storyWaterCapMeshes) {
         if (!cap) continue;
         if ((cap.userData?.waterRole || 'bridge') !== 'castle') continue;
-        cap.visible = !suppressed && devWaterFxEnabled;
+        cap.visible = !suppressed && devWaterFxEnabled && !castleMoatDrained;
     }
 }
 
@@ -10482,10 +10485,26 @@ const KING_PUNCH_DUR = 0.45;
 // after activateRagdoll hides the group is what froze the old version.
 function updateKingPose(dt) {
     if (!king || king.isRagdoll || !throneGroup) return;
+    const tNow = performance.now() * 0.001;
+    if (kingFloating && bunkerWp) {
+        // Belly-up float: horizontal on the surface, limbs out, crown slipping.
+        const bob = Math.sin(tNow * 2.1) * 0.045 + Math.sin(tNow * 3.7 + 1.3) * 0.02;
+        const targetY = bunkerWp.baseY - 0.12 + bob;
+        king.group.position.x += (throneGroup.position.x - king.group.position.x) * Math.min(1, dt * 3.2);
+        king.group.position.y += (targetY - king.group.position.y) * Math.min(1, dt * 3.2);
+        king.group.position.z += (throneGroup.position.z - king.group.position.z) * Math.min(1, dt * 3.2);
+        king.group.rotation.x += (-1.30 - king.group.rotation.x) * Math.min(1, dt * 2.6);
+        king.group.rotation.z = Math.sin(tNow * 1.4) * 0.08;
+        king.anim.armL.rotation.z += (1.25 - king.anim.armL.rotation.z) * Math.min(1, dt * 4);
+        king.anim.armR.rotation.z += (-1.25 - king.anim.armR.rotation.z) * Math.min(1, dt * 4);
+        // indignant little kicks
+        king.anim.legL.rotation.x = -0.15 + Math.sin(tNow * 5.2) * 0.22;
+        king.anim.legR.rotation.x = -0.15 + Math.sin(tNow * 5.2 + Math.PI) * 0.22;
+        return;
+    }
     // Ride the throne (it floats during the flood).
     king.group.position.set(throneGroup.position.x, throneGroup.position.y, throneGroup.position.z);
     king.group.rotation.y = Math.PI / 2;
-    const tNow = performance.now() * 0.001;
     // Seated: thighs forward, feet comically dangling; gentle breathing.
     king.anim.legL.rotation.x = -0.9;
     king.anim.legR.rotation.x = -0.9;
@@ -10504,6 +10523,69 @@ function updateKingPose(dt) {
     } else {
         king.anim.armL.rotation.x += (-0.55 - king.anim.armL.rotation.x) * Math.min(1, dt * 10);
         king.anim.armR.rotation.x += (-0.55 - king.anim.armR.rotation.x) * Math.min(1, dt * 10);
+    }
+}
+
+// The switch, the moat drain, the flood, the floating king, and the drowning
+// escape-window. Timer starts on first bunker entry and keeps running even if
+// the player leaves — the flood is world state.
+let moatDrainT = 0, bunkerFloodT = 0, kingSwitchPullT = 0, kingFloating = false;
+function updateBunkerFlood(dt) {
+    if (kingSwitchTimer > 0 && !gameOver) {
+        kingSwitchTimer -= dt;
+        if (kingSwitchTimer <= 0) {
+            kingSwitchTimer = 0;
+            castleMoatDraining = true;
+            bunkerFlooding = true;
+            castleMoatDrained = true;   // gameplay flags flip at drain START
+            kingSwitchPullT = 0.9;
+            if (storyModeEnabled) setStoryHud('The King pulled the switch — the bunker is flooding!');
+        }
+    }
+    if (kingSwitchPullT > 0 && throneGroup) {
+        kingSwitchPullT -= dt;
+        const lever = throneGroup.userData.leverArm;
+        if (lever) lever.rotation.x = THREE.MathUtils.lerp(-0.6, 0.6, 1 - Math.max(0, kingSwitchPullT / 0.9));
+    }
+    // The moat visibly empties into the room.
+    if (castleMoatDraining && moatDrainT < MOAT_DRAIN_SEC) {
+        moatDrainT = Math.min(MOAT_DRAIN_SEC, moatDrainT + dt);
+        const t = moatDrainT / MOAT_DRAIN_SEC;
+        const y = THREE.MathUtils.lerp(WATER_Y, MOAT_DRAINED_Y, t);
+        if (castleMoatWaterPlane) castleMoatWaterPlane.baseY = y;
+        if (castleMoatWaterCap) {
+            castleMoatWaterCap.position.y = THREE.MathUtils.lerp(SIMPLE_WATER_SURFACE_Y, MOAT_DRAINED_Y, t);
+            if (t >= 1) castleMoatWaterCap.visible = false;
+        }
+        if (typeof moatReflector !== 'undefined' && moatReflector) moatReflector.visible = false;
+    }
+    // The bunker fills.
+    if (bunkerFlooding && bunkerWp && bunkerFloodT < BUNKER_FLOOD_RISE_SEC) {
+        bunkerFloodT = Math.min(BUNKER_FLOOD_RISE_SEC, bunkerFloodT + dt);
+        const t = bunkerFloodT / BUNKER_FLOOD_RISE_SEC;
+        bunkerWp.baseY = THREE.MathUtils.lerp(BUNKER.FLOOR_Y - 0.15, BUNKER_WATER_MAX_Y, t);
+        if (bunkerWp.underlay) bunkerWp.underlay.visible = devWaterFxEnabled;
+        if (bunkerWp.ripple) bunkerWp.ripple.visible = devWaterFxEnabled;
+    }
+    // Once it is deep enough the fat king floats — on his BACK, furious, while
+    // the empty throne bobs beside him (a seated king on a floating throne
+    // would poke straight through the ceiling).
+    if (bunkerWp && bunkerFlooding && king && !king.isRagdoll && throneGroup) {
+        const wy = bunkerWp.baseY;
+        if (wy > BUNKER.FLOOR_Y + 1.2) kingFloating = true;
+        if (wy > BUNKER.FLOOR_Y + 0.45) {
+            const tNow = performance.now() * 0.001;
+            const bob = Math.sin(tNow * 2.1) * 0.045 + Math.sin(tNow * 3.7 + 1.3) * 0.02;
+            throneGroup.position.y += ((wy + 0.05 + bob) - throneGroup.position.y) * Math.min(1, dt * 3.2);
+            throneGroup.rotation.z = Math.sin(tNow * 1.3) * 0.03;
+            throneGroup.rotation.x = Math.sin(tNow * 1.7 + 0.7) * 0.025;
+        }
+    }
+    // Rising water past the head starts the drown — the escape window closes.
+    if (bunkerFlooding && bunkerWp && bunkerState.phase !== 'above' && !playerWaterState && !gameOver) {
+        if (bunkerWp.baseY >= camera.position.y - 0.1) {
+            beginPlayerWaterFall(bunkerWp.baseY);
+        }
     }
 }
 
@@ -10538,7 +10620,7 @@ function updateKingAI(dt) {
         }
         return;
     }
-    if (bunkerState.phase !== 'inside' || disarmNpc) return;
+    if (bunkerState.phase !== 'inside' || disarmNpc || kingFloating || playerWaterState) return;
     const dx = camera.position.x - king.group.position.x;
     const dz = camera.position.z - king.group.position.z;
     if (Math.hypot(dx, dz) < KING_PUNCH_RANGE && kingPunchCooldown <= 0) {
@@ -13101,7 +13183,7 @@ function resetPlayerWaterState(clearReason = true) {
     }
 }
 
-function beginPlayerWaterFall() {
+function beginPlayerWaterFall(surfaceY = null) {
     if (playerWaterState || gameOver) return;
     const a = Math.random() * Math.PI * 2;
     const wy = getWaterSurfaceYAtXZ(camera.position.x, camera.position.z);
@@ -13114,6 +13196,7 @@ function beginPlayerWaterFall() {
         drownAt: PLAYER_WATER_DROWN_MIN_SEC + Math.random() * PLAYER_WATER_DROWN_JITTER_SEC,
         driftX: Math.cos(a),
         driftZ: Math.sin(a),
+        surfaceY,   // null = global moat level; set for the rising bunker flood
     };
     playerOnGround = false;
     playerYVel = Math.min(playerYVel, -2.8);
@@ -13135,7 +13218,9 @@ function updatePlayerWaterFall(dt) {
     const sinkStart = ws.drownAt * 0.68;
     const sinkT = Math.max(0, (ws.elapsed - sinkStart) / Math.max(0.2, ws.drownAt - sinkStart));
     const sink = sinkT * sinkT * 0.54;
-    const targetY = WATER_Y + PLAYER_WATER_EYE_OFFSET + wobble - sink;
+    // The bunker flood chases its own rising surface; the moat uses WATER_Y.
+    if (ws.surfaceY != null && bunkerWp) ws.surfaceY = bunkerWp.baseY;
+    const targetY = (ws.surfaceY ?? WATER_Y) + PLAYER_WATER_EYE_OFFSET + wobble - sink;
     camera.position.y = THREE.MathUtils.lerp(
         camera.position.y,
         targetY,
