@@ -2783,6 +2783,7 @@ let bunkerFlooding = false, castleMoatDraining = false, castleMoatDrained = fals
 let bunkerCoinsCollected = 0;
 let castleMoatWaterPlane = null, castleMoatWaterCap = null;
 let kingSwitchTimer = -1;         // seconds until the king pulls the switch (-1 = idle)
+let bunkerHeistWin = false;       // set when the stage-2 win is the coin heist
 const bunkerPickups = [];         // { mesh, kind: 'key'|'coin', collected, baseY, phase }
 const castleIslandStripBodies = [];  // 3 island strips around the bunker footprint (bridge-managed)
 let templateGroundOverrideMesh = null;
@@ -6347,6 +6348,45 @@ function updateTrapdoor(dt) {
     castleSceneMeshes.push(key);
     bunkerPickups.push({ mesh: key, kind: 'key', collected: false, baseY: 0.95, phase: Math.random() * Math.PI * 2 });
 })();
+
+// The king's coin hoard: 10 gold coins scattered around the throne. Shared
+// geometry/material; collected by walking over them (updateBunkerPickups).
+const coinCountEl = document.getElementById('coinCount');
+const coinHudEl = document.getElementById('coinHud');
+const coinTimerEl = document.getElementById('coinTimer');
+(function buildBunkerCoins() {
+    const coinGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.045, 12);
+    coinGeo.rotateZ(Math.PI / 2);   // stand on edge, spins like a Mario coin
+    const coinMat = new THREE.MeshStandardMaterial({
+        color: 0xd4af37, metalness: 0.9, roughness: 0.22, emissive: 0x2a1e00,
+    });
+    const TX = BUNKER.THRONE_X, TZ = BUNKER.THRONE_Z;
+    const spots = [];
+    for (const a of [0, 60, 120, 180, 240, 300]) spots.push([TX + Math.cos(a * Math.PI / 180) * 1.4, TZ + Math.sin(a * Math.PI / 180) * 1.4]);
+    for (const a of [30, 90, 150, 270]) spots.push([TX + Math.cos(a * Math.PI / 180) * 2.6, TZ + Math.sin(a * Math.PI / 180) * 2.6]);
+    for (const [cx, cz] of spots) {
+        const coin = new THREE.Mesh(coinGeo, coinMat);
+        coin.position.set(cx, BUNKER.FLOOR_Y + 0.5, cz);
+        scene.add(coin);
+        castleSceneMeshes.push(coin);
+        bunkerPickups.push({ mesh: coin, kind: 'coin', collected: false, baseY: BUNKER.FLOOR_Y + 0.5, phase: Math.random() * Math.PI * 2 });
+    }
+})();
+
+let _coinHudLast = '';
+function updateCoinHud() {
+    if (!coinHudEl) return;
+    const show = bunkerEverEntered || bunkerCoinsCollected > 0 || (storyModeEnabled && storyStage >= 2 && !gameOver);
+    const timerTxt = (kingSwitchTimer > 0 && bunkerEverEntered && !bunkerFlooding)
+        ? ` · ⚠ ${Math.ceil(kingSwitchTimer)}s`
+        : (bunkerFlooding ? ' · 🌊' : '');
+    const key = `${show}|${bunkerCoinsCollected}|${timerTxt}`;
+    if (key === _coinHudLast) return;
+    _coinHudLast = key;
+    coinHudEl.style.display = show ? 'block' : 'none';
+    if (coinCountEl) coinCountEl.textContent = bunkerCoinsCollected;
+    if (coinTimerEl) coinTimerEl.textContent = timerTxt;
+}
 
 function updateBunkerPickups(dt) {
     const px = camera.position.x, pz = camera.position.z;
@@ -10481,6 +10521,37 @@ const KING_PUNCH_DUR = 0.45;
     throneGroup.userData.leverArm = leverArm;
 })();
 
+// Per-frame hub for the whole King's Bunker feature. Called once from
+// animate() right after updateStoryProgression (movement already done).
+function updateKingsBunker(dt) {
+    if (storyCastleSuppressed || window.__editorActive) {
+        // Castle stage hidden (bridge/template) or editor: keep prompts off and
+        // bank the torch cost (intensity 0 — lights are never added/removed).
+        if (interactPromptEl) interactPromptEl.style.display = 'none';
+        if (mobileInteractBtn) mobileInteractBtn.style.display = 'none';
+        for (const t of bunkerTorches) t.light.intensity = 0;
+        return;
+    }
+    updateTrapdoor(dt);
+    updateBunkerTransition(dt);
+    updateInteractPrompt();
+    updateBunkerPickups(dt);
+    updateKingPose(dt);
+    updateKingAI(dt);
+    updateBunkerFlood(dt);
+    updateCoinHud();
+    // Torch flicker: intensity + flame scale only (constant light count).
+    const tNow = performance.now() * 0.001;
+    for (const t of bunkerTorches) {
+        const n = (Math.sin(tNow * 11 + t.phase) + Math.sin(tNow * 23 + t.phase * 1.7)) * 0.25 + 0.5;
+        t.light.intensity = t.baseI * (0.85 + 0.3 * n);
+        const s = 0.9 + 0.25 * n;
+        t.flame.scale.set(s, 1.0 + 0.35 * n, s);
+    }
+    // Rain and snow do not fall indoors.
+    if (precipPoints) precipPoints.visible = bunkerState.phase === 'above' ? (precipMode != null) : false;
+}
+
 // Per-frame seated pose. MUST early-return on ragdoll: pinning limbs/position
 // after activateRagdoll hides the group is what froze the old version.
 function updateKingPose(dt) {
@@ -13624,7 +13695,7 @@ function advanceToCastleStage() {
     _npcAggroTriggered = false;
     _hutChargerTriggered = false;
     const alive = countAliveStoryNpcs('castle');
-    setStoryHud(`Story 2/2: Break the castle defenders (${alive} left)`);
+    setStoryHud(`Story 2/2: Rob the King's bunker — find the key in the old hut${alive > 0 ? ` · ${alive} guards` : ''}`);
 }
 
 function updateStoryBridgeConvoy(dt) {
@@ -13868,12 +13939,25 @@ function updateStoryProgression() {
     }
 
     if (storyStage === 2) {
-        const aliveCastle = countAliveStoryNpcs('castle');
-        setStoryHud(`Story 2/2: Break the castle defenders (${aliveCastle} left)`);
-        if (aliveCastle === 0) {
+        // The heist: rob all 10 coins and get back above ground. Guards are a
+        // hazard, not a requirement — killing them does not end the stage.
+        const coinsLeft = BUNKER_COIN_TOTAL - bunkerCoinsCollected;
+        if (coinsLeft === 0 && bunkerEverEntered && bunkerState.phase === 'above') {
+            bunkerHeistWin = true;
             storyStage = 3;
             showGameOver(false, true);
+            return;
         }
+        const aliveCastle = countAliveStoryNpcs('castle');
+        const guardsNote = aliveCastle > 0 ? ` · ${aliveCastle} guards` : '';
+        let obj;
+        if (bunkerState.phase === 'inside' && bunkerFlooding) obj = 'Get out — the bunker is flooding!';
+        else if (bunkerState.phase !== 'above' && coinsLeft > 0) obj = `Rob the King's bunker (${coinsLeft} coin${coinsLeft === 1 ? '' : 's'} left)`;
+        else if (coinsLeft === 0) obj = 'Escape the bunker!';
+        else if (bunkerEverEntered) obj = `Back to the bunker (${coinsLeft} coins left)`;
+        else if (!hasKey && trapdoor && trapdoor.state === 'locked') obj = 'Find the bunker key — last seen in the old hut';
+        else obj = 'Open the courtyard trapdoor';
+        setStoryHud(obj + guardsNote);
     }
 }
 
@@ -13940,9 +14024,16 @@ function showGameOver(killedByArrows = false, storyVictory = false, defeatReason
         document.getElementById('goScores').textContent =
             `P1: ${score} pts  |  P2: ${p2Score} pts  \u2022  ${difficultyName(currentDifficulty)} best: ${best}`;
     } else if (storyVictory) {
-        document.getElementById('goMsg').textContent = 'Bridge Broken. Castle Fallen.';
-        document.getElementById('goScores').textContent =
-            `All defenders eliminated � ${bricksDestroyed} bricks destroyed in ${shotsFired} shots`;
+        if (bunkerHeistWin) {
+            document.getElementById('goMsg').textContent = 'The King\'s gold is yours!';
+            document.getElementById('goScores').textContent =
+                `Bunker robbed clean • ${bricksDestroyed} bricks destroyed in ${shotsFired} shots` +
+                (king && king.isRagdoll ? ' • and the King is dead' : ' • and the King never saw it coming');
+        } else {
+            document.getElementById('goMsg').textContent = 'Bridge Broken. Castle Fallen.';
+            document.getElementById('goScores').textContent =
+                `All defenders eliminated � ${bricksDestroyed} bricks destroyed in ${shotsFired} shots`;
+        }
         setStoryHud('Story Complete');
     } else {
         const prevBest = getHighScore(currentDifficulty, mode);
@@ -20668,6 +20759,7 @@ function animate() {
     // Knight+ siege unit behavior.
     updateBallistaEncounter(dt);
     updateStoryProgression();
+    updateKingsBunker(dt);
 
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
