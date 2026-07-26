@@ -2163,6 +2163,14 @@ function createBroadphase(mode) {
 const _broadphaseMode = parseBroadphaseMode();
 const sapBroadphase = createBroadphase(_broadphaseMode);
 world.broadphase = sapBroadphase;
+// AABB staleness fix: updateMassProperties() computes the AABB at construction
+// (position 0,0,0) and clears aabbNeedsUpdate, and Body.position.set() does not
+// re-flag it — so every body positioned after construction kept its ORIGIN
+// AABB forever. Raycasts (ball CCD anti-tunnel) query via AABBs, so they were
+// effectively blind away from the origin. Flag every body on add; aabbQuery
+// refreshes flagged bodies lazily at query time.
+const _origWorldAddBody = world.addBody.bind(world);
+world.addBody = (body) => { body.aabbNeedsUpdate = true; _origWorldAddBody(body); };
 // Stiff contacts need more solver passes to converge; 20 keeps a 12-high stack
 // of heavy blocks rock-steady and � crucially � makes the left and right halves
 // of a wall settle identically instead of one side ending up pre-stressed.
@@ -2952,7 +2960,13 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
         slab(_MIX1, BUNKER.X1, BUNKER.Z1, BUNKER.Z2, 0),                   // left strip
         slab(BUNKER.X2, _MIX2, BUNKER.Z1, BUNKER.Z2, 0),                   // right strip
     );
-    slab(_MOX1, _MOX2, _MOZ1, _MOZ2, -(WATER_DEPTH_M * 2)); // moat trench floor (~0.7m below the water surface)
+    // Moat trench floor (also the earth under the island): four strips leaving
+    // the bunker footprint open — the original slab ran right through the
+    // middle of the room at y=-1.4 and shielded the king from above.
+    slab(_MOX1, _MOX2, _MOZ1, BUNKER.Z1, -(WATER_DEPTH_M * 2));   // front of bunker
+    slab(_MOX1, _MOX2, BUNKER.Z2, _MOZ2, -(WATER_DEPTH_M * 2));   // back of bunker
+    slab(_MOX1, BUNKER.X1, BUNKER.Z1, BUNKER.Z2, -(WATER_DEPTH_M * 2)); // left
+    slab(BUNKER.X2, _MOX2, BUNKER.Z1, BUNKER.Z2, -(WATER_DEPTH_M * 2)); // right
 
     // === King's Bunker static colliders (indestructible stone room) ===
     // Thin ceiling restores the y=0 surface over the room (minus the shaft), so
@@ -6160,7 +6174,9 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
         return s - Math.floor(s);
     };
     const lumpPanel = (w, h) => {
-        const g = new THREE.PlaneGeometry(w, h, 16, 6);
+        // Non-indexed so it merges with the (non-indexed) dodecahedron studs;
+        // position-hashed jitter keeps shared vertices crack-free.
+        const g = new THREE.PlaneGeometry(w, h, 16, 6).toNonIndexed();
         const pos = g.attributes.position;
         for (let i = 0; i < pos.count; i++) {
             const px = pos.getX(i), py = pos.getY(i);
@@ -6363,7 +6379,8 @@ const coinTimerEl = document.getElementById('coinTimer');
     const TX = BUNKER.THRONE_X, TZ = BUNKER.THRONE_Z;
     const spots = [];
     for (const a of [0, 60, 120, 180, 240, 300]) spots.push([TX + Math.cos(a * Math.PI / 180) * 1.4, TZ + Math.sin(a * Math.PI / 180) * 1.4]);
-    for (const a of [30, 90, 150, 270]) spots.push([TX + Math.cos(a * Math.PI / 180) * 2.6, TZ + Math.sin(a * Math.PI / 180) * 2.6]);
+    // Outer ring angles keep every coin east of the west-wall reach limit.
+    for (const a of [20, 60, 90, 330]) spots.push([TX + Math.cos(a * Math.PI / 180) * 2.6, TZ + Math.sin(a * Math.PI / 180) * 2.6]);
     for (const [cx, cz] of spots) {
         const coin = new THREE.Mesh(coinGeo, coinMat);
         coin.position.set(cx, BUNKER.FLOOR_Y + 0.5, cz);
@@ -6505,6 +6522,7 @@ function beginBunkerTransition(dir) {
 }
 
 function updateBunkerTransition(dt) {
+    if (bunkerState.phase !== 'descending' && bunkerState.phase !== 'ascending') return;
     const SEG_TIMES = [0.55, 1.5];
     bunkerState.t += dt / SEG_TIMES[bunkerState.seg];
     const t = Math.min(1, bunkerState.t);
@@ -6532,6 +6550,61 @@ function updateBunkerTransition(dt) {
 
 // === Front-facing cloth banners that hang from the battlements ===
 // Each banner hangs against the front wall, anchored to the nearest wall brick.
+
+// Dev/test hook (harmless in production): lets an automated browser test drive
+// the heist loop without simulating minutes of play.
+window.__bunkerTest = {
+    camera,
+    state: () => bunkerState,
+    pickups: bunkerPickups,
+    king: () => king,
+    trapdoor: () => trapdoor,
+    throne: () => throneGroup,
+    water: () => bunkerWp,
+    hasKey: () => hasKey,
+    giveKey: () => { hasKey = true; },
+    tryInteract,
+    getInteractContext,
+    coinsCollected: () => bunkerCoinsCollected,
+    everEntered: () => bunkerEverEntered,
+    flooding: () => ({ bunkerFlooding, castleMoatDrained, moatY: castleMoatWaterPlane ? castleMoatWaterPlane.baseY : null, bunkerY: bunkerWp ? bunkerWp.baseY : null }),
+    switchTimer: () => kingSwitchTimer,
+    teleportAbove: () => {
+        camera.position.set(BUNKER.TRAPDOOR_X, PLAYER_BASE_Y, BUNKER.TRAPDOOR_Z - 1.9);
+        bunkerState.phase = 'above';
+    },
+    teleportInside: () => {
+        camera.position.set(BUNKER.TRAPDOOR_X, BUNKER.EYE_Y, BUNKER.TRAPDOOR_Z);
+        bunkerState.phase = 'inside';
+        if (!bunkerEverEntered) { bunkerEverEntered = true; kingSwitchTimer = BUNKER_FLOOD_DELAY_SEC; }
+    },
+    // Physics probes for automated verification of the two original bugs.
+    probeDown: (x, z, fromY = 2, skipBackfaces = true) => {
+        const rc = new CANNON.RaycastResult();
+        world.raycastClosest(new CANNON.Vec3(x, fromY, z), new CANNON.Vec3(x, -30, z),
+            { collisionFilterMask: -1, skipBackfaces }, rc);
+        return rc.hasHit ? rc.hitPointWorld.y : null;
+    },
+    blast: (x, y, z, r = 4) => triggerBlast(new THREE.Vector3(x, y, z), r),
+    aim: (y, p) => { yaw = y; pitch = p; },
+    rafAlive: (() => { let n = 0; const tick = () => { n++; requestAnimationFrame(tick); }; requestAnimationFrame(tick); return () => n; })(),
+    countBodies: () => world.bodies.length,
+    gameFlags: () => ({ gameOver, gamePaused, storyCastleSuppressed, storyModeEnabled, storyStage, playerWaterState: !!playerWaterState, playerHits }),
+    aabbsNear: (x, z, r = 6) => world.bodies
+        .filter(b => Math.abs(b.position.x - x) < r && Math.abs(b.position.z - z) < r && Math.abs(b.position.y) < 100)
+        .map(b => ({
+            pos: [+b.position.x.toFixed(1), +b.position.y.toFixed(1), +b.position.z.toFixed(1)],
+            lb: [+b.aabb.lowerBound.x.toFixed(1), +b.aabb.lowerBound.y.toFixed(1), +b.aabb.lowerBound.z.toFixed(1)],
+            ub: [+b.aabb.upperBound.x.toFixed(1), +b.aabb.upperBound.y.toFixed(1), +b.aabb.upperBound.z.toFixed(1)],
+            upd: b.aabbNeedsUpdate,
+        }))
+        .slice(0, 30),
+    bodiesNear: (x, z, r = 6) => world.bodies
+        .filter(b => Math.abs(b.position.x - x) < r && Math.abs(b.position.z - z) < r && Math.abs(b.position.y) < 100)
+        .map(b => ({ x: +b.position.x.toFixed(1), y: +b.position.y.toFixed(1), z: +b.position.z.toFixed(1), mass: b.mass, type: b.type }))
+        .slice(0, 40),
+};
+
 // When that brick is knocked loose (woken / displaced), the banner detaches and
 // falls under its own simple gravity (a full cloth sim would be overkill).
 const banners = [];
