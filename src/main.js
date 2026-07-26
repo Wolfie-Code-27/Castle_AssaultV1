@@ -6356,6 +6356,34 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     scene.add(dais);
     castleSceneMeshes.push(dais);
 
+    // Ladder down the east lining wall of the stairwell (visual only — the
+    // ramp itself is what you walk on).
+    {
+        const ladderMat = new THREE.MeshStandardMaterial({ color: 0x5a4022, roughness: 0.85 });
+        const topZ = B.OPEN_Z1 + 0.35, topY = 0.18;
+        const botZ = B.OPEN_Z2 - 0.35, botY = B.RAMP1_BOT + 0.1;
+        const len = Math.hypot(botZ - topZ, botY - topY);
+        const ang = Math.atan2(botY - topY, botZ - topZ);
+        const geos = [];
+        const railGeo = new THREE.BoxGeometry(0.055, 0.05, len);
+        for (const rx of [-0.24, 0.24]) {
+            const g = railGeo.clone();
+            g.translate(rx, 0, len / 2);
+            geos.push(g);
+        }
+        const rungCount = Math.floor(len / 0.36);
+        for (let i = 1; i < rungCount; i++) {
+            const g = new THREE.BoxGeometry(0.48, 0.045, 0.05);
+            g.translate(0, 0, i * 0.36);
+            geos.push(g);
+        }
+        const ladder = new THREE.Mesh(mergeGeometries(geos), ladderMat);
+        ladder.position.set(B.OPEN_X2 - 0.30, topY, topZ);
+        ladder.rotation.x = ang;
+        scene.add(ladder);
+        castleSceneMeshes.push(ladder);
+    }
+
     // Wall torches: emissive-look flame cones + a fixed pool of point lights.
     const torchSpots = [
         { x: B.OPEN_X2 - 0.28, y: -2.3, z: 78.5, nx: -1, nz: 0 },     // stairwell east wall
@@ -18227,6 +18255,16 @@ function animate() {
                 // Step up onto masonry (ramp stairs, deck) at a climb rate
                 // instead of snapping, so mounting courses reads as climbing.
                 camera.position.y = Math.min(floorY, camera.position.y + 9.0 * dt);
+            } else if (floorY < camera.position.y - 0.3
+                       && bunkerEyeYAt(camera.position.x, camera.position.z, camera.position.y) != null) {
+                // Steep bunker descent: glide down the ramp at a controlled
+                // rate instead of bounce-falling off it frame after frame.
+                camera.position.y = Math.max(floorY, camera.position.y - 10.0 * dt);
+                if (camera.position.y <= floorY + 1e-4) {
+                    camera.position.y = floorY;
+                    playerYVel = 0;
+                    playerOnGround = true;
+                }
             } else if (floorY < camera.position.y - 0.3) {
                 playerOnGround = false;   // walked off an edge � gravity takes over
             } else {
