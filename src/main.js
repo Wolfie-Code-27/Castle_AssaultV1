@@ -2749,6 +2749,42 @@ let bridgeCenterExtGroundBodyBack = null;
 // y=0 castle-stage covers over the four bridge-water trench rects (attached
 // while the bridge stage is suppressed, detached while it is active).
 const castleBridgeBandCoverBodies = [];
+
+// === The King's Bunker (underground heist room below the castle courtyard) ===
+// Layout: room spans BUNKER.X1..X2 x Z1..Z2, ceiling just under the courtyard,
+// floor deep enough to feel like a stone cellar. A 1.4x1.4 shaft with a locked
+// trapdoor connects it to the courtyard; the throne sits at the far end.
+const BUNKER = {
+    X1: 3, X2: 13, Z1: 58, Z2: 66,
+    FLOOR_Y: -3.4, CEIL_Y: -0.5,
+    EYE_Y: -3.4 + 2.2,                       // FLOOR_Y + PLAYER_BASE_Y
+    SHAFT_X1: 7.3, SHAFT_X2: 8.7, SHAFT_Z1: 61.3, SHAFT_Z2: 62.7,
+    TRAPDOOR_X: 8, TRAPDOOR_Z: 62,
+    THRONE_X: 4.6, THRONE_Z: 62,             // far end from the shaft, faces +x
+    CEIL_COLLIDER_T: 0.6,
+};
+const BUNKER_COIN_TOTAL = 10, BUNKER_COIN_SCORE = 50, KING_BONUS_SCORE = 500;
+const BUNKER_FLOOD_DELAY_SEC = 20, BUNKER_FLOOD_RISE_SEC = 60, BUNKER_WATER_MAX_Y = -1.0;
+const MOAT_DRAIN_SEC = 6, MOAT_DRAINED_Y = -1.55;   // just under the trench floor top (-1.4)
+const KING_PUNCH_RANGE = 2.0, KING_PUNCH_COOLDOWN = 2.5;
+
+// Bunker runtime state. 'above' = player anywhere outside the room;
+// descending/ascending = scripted camera transition (input suspended).
+const bunkerState = { phase: 'above', seg: 0, t: 0, from: new THREE.Vector3(), via: new THREE.Vector3(), to: new THREE.Vector3() };
+let bunkerEverEntered = false;
+let hasKey = false;
+let trapdoor = null;              // { pivot, state: 'locked'|'opening'|'open', angle }
+let trapdoorBody = null;          // locked-cover collider (removed when opened)
+const bunkerColliderBodies = [];  // all static bunker physics, for castle suppression
+let king = null;                  // the king NPC entry
+let throneGroup = null;
+let bunkerWp = null;              // bunker flood water plane record
+let bunkerFlooding = false, castleMoatDraining = false, castleMoatDrained = false;
+let bunkerCoinsCollected = 0;
+let castleMoatWaterPlane = null, castleMoatWaterCap = null;
+let kingSwitchTimer = -1;         // seconds until the king pulls the switch (-1 = idle)
+const bunkerPickups = [];         // { mesh, kind: 'key'|'coin', collected, baseY, phase }
+const castleIslandStripBodies = [];  // 3 island strips around the bunker footprint (bridge-managed)
 let templateGroundOverrideMesh = null;
 let templateGroundOverrideBody = null;
 const templateGroundCarvedBodies = [];
@@ -2847,14 +2883,14 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
 // catches the debris a touch below the water surface.
 (function buildGroundColliders() {
     const T = 30;   // slab thickness (top sits at the given Y)
-    function slab(x1, x2, z1, z2, topY) {
+    function slab(x1, x2, z1, z2, topY, thick = T) {
         const w = x2 - x1, d = z2 - z1;
         if (w <= 0 || d <= 0) return;
         const body = new CANNON.Body({
             mass: 0, material: brickPhysMat,
-            shape: new CANNON.Box(new CANNON.Vec3(w / 2, T / 2, d / 2)),
+            shape: new CANNON.Box(new CANNON.Vec3(w / 2, thick / 2, d / 2)),
         });
-        body.position.set((x1 + x2) / 2, topY - T / 2, (z1 + z2) / 2);
+        body.position.set((x1 + x2) / 2, topY - thick / 2, (z1 + z2) / 2);
         world.addBody(body);
         return body;
     }
@@ -2904,8 +2940,60 @@ addGround((_MIX1 + _MIX2) / 2, (_MIZ1 + _MIZ2) / 2, _MIX2 - _MIX1, _MIZ2 - _MIZ1
         slab(BRIDGE_WATER_MIN_X, BRIDGE_WATER_MAX_X, _MOZ2, BRIDGE_BAND_Z2, 0)  // back ext cover
     );
 
-    castleIslandGroundBody = slab(_MIX1, _MIX2, _MIZ1, _MIZ2, 0);    // castle island
+    // Castle island: four strips leaving the King's Bunker footprint open for
+    // the full slab depth (the slab is 30 m thick, so a shallow hole would put
+    // solid collider volume right through the room — balls would eject upward).
+    // All four follow the original slab's bridge-stage lifecycle (registered
+    // with markStoryBridgeBody further down).
+    castleIslandGroundBody = slab(_MIX1, _MIX2, _MIZ1, BUNKER.Z1, 0);  // front strip
+    castleIslandStripBodies.push(
+        slab(_MIX1, _MIX2, BUNKER.Z2, _MIZ2, 0),                           // back strip
+        slab(_MIX1, BUNKER.X1, BUNKER.Z1, BUNKER.Z2, 0),                   // left strip
+        slab(BUNKER.X2, _MIX2, BUNKER.Z1, BUNKER.Z2, 0),                   // right strip
+    );
     slab(_MOX1, _MOX2, _MOZ1, _MOZ2, -(WATER_DEPTH_M * 2)); // moat trench floor (~0.7m below the water surface)
+
+    // === King's Bunker static colliders (indestructible stone room) ===
+    // Thin ceiling restores the y=0 surface over the room (minus the shaft), so
+    // courtyard bricks/balls behave exactly as before; the shaft is the only
+    // opening, covered by the locked trapdoor body until the key is used.
+    {
+        const B = BUNKER, CT = B.CEIL_COLLIDER_T;
+        bunkerColliderBodies.push(
+            // ceiling ring around the shaft (top flush at y=0)
+            slab(B.X1, B.SHAFT_X1, B.Z1, B.Z2, 0, CT),
+            slab(B.SHAFT_X2, B.X2, B.Z1, B.Z2, 0, CT),
+            slab(B.SHAFT_X1, B.SHAFT_X2, B.Z1, B.SHAFT_Z1, 0, CT),
+            slab(B.SHAFT_X1, B.SHAFT_X2, B.SHAFT_Z2, B.Z2, 0, CT),
+            // room floor (deep earth below)
+            slab(B.X1, B.X2, B.Z1, B.Z2, B.FLOOR_Y),
+        );
+        // walls (interior faces flush with the footprint)
+        const wallT = 0.3, wallH = (0 - B.FLOOR_Y) + 0.6;   // up past the ceiling a touch
+        const wallCY = B.FLOOR_Y - 0.3 + wallH / 2;
+        const wallBox = (cx, cz, w, d) => {
+            const body = new CANNON.Body({
+                mass: 0, material: brickPhysMat,
+                shape: new CANNON.Box(new CANNON.Vec3(w / 2, wallH / 2, d / 2)),
+            });
+            body.position.set(cx, wallCY, cz);
+            world.addBody(body);
+            bunkerColliderBodies.push(body);
+        };
+        wallBox((B.X1 + B.X2) / 2, B.Z1 - wallT / 2, (B.X2 - B.X1) + wallT * 2, wallT); // front
+        wallBox((B.X1 + B.X2) / 2, B.Z2 + wallT / 2, (B.X2 - B.X1) + wallT * 2, wallT); // back
+        wallBox(B.X1 - wallT / 2, (B.Z1 + B.Z2) / 2, wallT, B.Z2 - B.Z1);               // left
+        wallBox(B.X2 + wallT / 2, (B.Z1 + B.Z2) / 2, wallT, B.Z2 - B.Z1);               // right
+        // shaft side walls are the edges of the four ceiling slabs above.
+        // locked trapdoor cover (removed from the world when the door opens)
+        trapdoorBody = new CANNON.Body({
+            mass: 0, material: brickPhysMat,
+            shape: new CANNON.Box(new CANNON.Vec3((B.SHAFT_X2 - B.SHAFT_X1) / 2, 0.15, (B.SHAFT_Z2 - B.SHAFT_Z1) / 2)),
+        });
+        trapdoorBody.position.set(B.TRAPDOOR_X, -0.10, B.TRAPDOOR_Z);   // top ~y=0.05
+        world.addBody(trapdoorBody);
+        bunkerColliderBodies.push(trapdoorBody);
+    }
 })();
 
 // Level 3 template mode uses a single continuous grass ground override so
@@ -6008,11 +6096,23 @@ const woodPlankMat = new THREE.MeshStandardMaterial({
         map: flagTex, bumpMap: stoneBumpMap, bumpScale: 0.12,
         roughness: 0.97, metalness: 0.0, color: 0x9b958a
     });
-    const stoneFloor = new THREE.Mesh(new THREE.BoxGeometry(wX, 0.2, wZ), stoneFloorMat);
-    stoneFloor.position.set(cxC, 0.0, czC);   // top flush with ground (y=0.1)
-    stoneFloor.receiveShadow = true;
-    scene.add(stoneFloor);
-    castleSceneMeshes.push(stoneFloor);
+    // Stone floor as four boxes around the King's Bunker trapdoor shaft, so the
+    // visual hole exactly matches the collider opening (top flush, y=0.1).
+    const shaftRects = [
+        [x0, BUNKER.SHAFT_X1, z0, z1],                                  // west of shaft
+        [BUNKER.SHAFT_X2, x1, z0, z1],                                  // east of shaft
+        [BUNKER.SHAFT_X1, BUNKER.SHAFT_X2, z0, BUNKER.SHAFT_Z1],        // north strip
+        [BUNKER.SHAFT_X1, BUNKER.SHAFT_X2, BUNKER.SHAFT_Z2, z1],        // south strip
+    ];
+    for (const [fx0, fx1, fz0, fz1] of shaftRects) {
+        const fw = fx1 - fx0, fd = fz1 - fz0;
+        if (fw <= 0 || fd <= 0) continue;
+        const piece = new THREE.Mesh(new THREE.BoxGeometry(fw, 0.2, fd), stoneFloorMat);
+        piece.position.set((fx0 + fx1) / 2, 0.0, (fz0 + fz1) / 2);
+        piece.receiveShadow = true;
+        scene.add(piece);
+        castleSceneMeshes.push(piece);
+    }
 
     // Wooden great-hall floor over the rear half, raised one plank thickness.
     const woodTex = woodPlankTex.clone();
@@ -6028,6 +6128,151 @@ const woodPlankMat = new THREE.MeshStandardMaterial({
     hall.receiveShadow = true; hall.castShadow = true;
     scene.add(hall);
     castleSceneMeshes.push(hall);
+})();
+
+// === The King's Bunker room: lumpy stone cellar under the courtyard ===
+// Indestructible (visual meshes only — physics is the static collider set in
+// buildGroundColliders). Torch PointLights are created ONCE here at startup and
+// only ever intensity-flickered: adding/removing lights at runtime recompiles
+// every material's shader and would freeze the game (see note near the sun).
+const bunkerTorches = [];         // { light, flame, baseI, phase }
+(function buildBunkerRoom() {
+    const B = BUNKER;
+    const roomW = B.X2 - B.X1, roomD = B.Z2 - B.Z1;
+    const roomCX = (B.X1 + B.X2) / 2, roomCZ = (B.Z1 + B.Z2) / 2;
+    const wallH = B.CEIL_Y - B.FLOOR_Y;
+    const wallCY = (B.FLOOR_Y + B.CEIL_Y) / 2;
+
+    // Lumpy stone: displaced plane panels (deterministic sine-hash jitter so the
+    // walls look hand-hewn) merged into a single draw call with stud boulders.
+    const wallTex = stoneColorMap.clone();
+    wallTex.needsUpdate = true;
+    wallTex.repeat.set(4, 1.6);
+    const bunkerStoneMat = new THREE.MeshStandardMaterial({
+        map: wallTex, bumpMap: stoneBumpMap, bumpScale: 0.18,
+        roughness: 0.98, metalness: 0.0, color: 0x4a4640,
+    });
+    const hash2 = (a, b) => {
+        const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+        return s - Math.floor(s);
+    };
+    const lumpPanel = (w, h) => {
+        const g = new THREE.PlaneGeometry(w, h, 16, 6);
+        const pos = g.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            const px = pos.getX(i), py = pos.getY(i);
+            const edge = Math.min(w / 2 - Math.abs(px), h / 2 - Math.abs(py));
+            const amp = Math.min(0.22, Math.max(0, edge)) ;   // keep panel borders flush
+            pos.setZ(i, (hash2(px, py) - 0.35) * amp);
+        }
+        g.computeVertexNormals();
+        return g;
+    };
+    const wallGeos = [];
+    const place = (g, x, y, z, rotY) => {
+        g.rotateY(rotY);
+        g.translate(x, y, z);
+        wallGeos.push(g);
+    };
+    place(lumpPanel(roomW, wallH), roomCX, wallCY, B.Z1, 0);              // front (+z)
+    place(lumpPanel(roomW, wallH), roomCX, wallCY, B.Z2, Math.PI);       // back  (-z)
+    place(lumpPanel(roomD, wallH), B.X1, wallCY, roomCZ, Math.PI / 2);   // left  (+x)
+    place(lumpPanel(roomD, wallH), B.X2, wallCY, roomCZ, -Math.PI / 2);  // right (-x)
+    // stud boulders
+    for (let i = 0; i < 18; i++) {
+        const sx = B.X1 + 0.3 + hash2(i, 1) * (roomW - 0.6);
+        const sz = B.Z1 + 0.3 + hash2(i, 2) * (roomD - 0.6);
+        const sy = B.FLOOR_Y + 0.4 + hash2(i, 3) * (wallH - 0.8);
+        const r = 0.10 + hash2(i, 4) * 0.16;
+        const g = new THREE.DodecahedronGeometry(r, 0);
+        g.scale(1, 0.55, 1);
+        // press the stud against the nearest wall
+        const dL = sx - B.X1, dR = B.X2 - sx, dF = sz - B.Z1, dB = B.Z2 - sz;
+        const m = Math.min(dL, dR, dF, dB);
+        let ox = sx, oz = sz;
+        if (m === dL) ox = B.X1 + 0.02; else if (m === dR) ox = B.X2 - 0.02;
+        else if (m === dF) oz = B.Z1 + 0.02; else oz = B.Z2 - 0.02;
+        g.translate(ox, sy, oz);
+        wallGeos.push(g);
+    }
+    const wallsMesh = new THREE.Mesh(mergeGeometries(wallGeos), bunkerStoneMat);
+    wallsMesh.receiveShadow = true;
+    scene.add(wallsMesh);
+    castleSceneMeshes.push(wallsMesh);
+
+    // Floor + ceiling (ceiling ring mirrors the collider hole around the shaft)
+    const bunkerFloorMat = new THREE.MeshStandardMaterial({
+        map: wallTex, bumpMap: stoneBumpMap, bumpScale: 0.14,
+        roughness: 0.99, metalness: 0.0, color: 0x36322d,
+    });
+    const floorMesh = new THREE.Mesh(new THREE.BoxGeometry(roomW, 0.2, roomD), bunkerFloorMat);
+    floorMesh.position.set(roomCX, B.FLOOR_Y - 0.1, roomCZ);
+    floorMesh.receiveShadow = true;
+    scene.add(floorMesh);
+    castleSceneMeshes.push(floorMesh);
+
+    const ceilRects = [
+        [B.X1, B.SHAFT_X1, B.Z1, B.Z2],
+        [B.SHAFT_X2, B.X2, B.Z1, B.Z2],
+        [B.SHAFT_X1, B.SHAFT_X2, B.Z1, B.SHAFT_Z1],
+        [B.SHAFT_X1, B.SHAFT_X2, B.SHAFT_Z2, B.Z2],
+    ];
+    for (const [cx0, cx1, cz0, cz1] of ceilRects) {
+        const cw = cx1 - cx0, cd = cz1 - cz0;
+        const piece = new THREE.Mesh(new THREE.BoxGeometry(cw, 0.12, cd), bunkerFloorMat);
+        piece.position.set((cx0 + cx1) / 2, B.CEIL_Y + 0.06, (cz0 + cz1) / 2);
+        scene.add(piece);
+        castleSceneMeshes.push(piece);
+    }
+    // Shaft lining (visual stone throat from the courtyard down to the ceiling)
+    const linH = 0.62;
+    const linRects = [
+        [B.SHAFT_X1 - 0.04, roomCZShaft(), 0.08, B.SHAFT_Z2 - B.SHAFT_Z1],
+        [B.SHAFT_X2 + 0.04, roomCZShaft(), 0.08, B.SHAFT_Z2 - B.SHAFT_Z1],
+    ];
+    function roomCZShaft() { return (B.SHAFT_Z1 + B.SHAFT_Z2) / 2; }
+    for (const [lx, lz, lw, ld] of linRects) {
+        const lin = new THREE.Mesh(new THREE.BoxGeometry(lw, linH, ld), bunkerFloorMat);
+        lin.position.set(lx, -0.5 + linH / 2, lz);
+        scene.add(lin);
+        castleSceneMeshes.push(lin);
+    }
+    for (const [lz, lw] of [[B.SHAFT_Z1 - 0.04, B.SHAFT_X2 - B.SHAFT_X1 + 0.16], [B.SHAFT_Z2 + 0.04, B.SHAFT_X2 - B.SHAFT_X1 + 0.16]]) {
+        const lin = new THREE.Mesh(new THREE.BoxGeometry(lw, linH, 0.08), bunkerFloorMat);
+        lin.position.set(B.TRAPDOOR_X, -0.5 + linH / 2, lz);
+        scene.add(lin);
+        castleSceneMeshes.push(lin);
+    }
+
+    // Wall torches: emissive-look flame cones + a fixed pool of point lights.
+    const torchSpots = [
+        { x: roomCX - 1.5, y: -1.35, z: B.Z2 - 0.22, nx: 0, nz: -1 },   // back wall
+        { x: B.X1 + 0.22, y: -1.35, z: roomCZ - 1.0, nx: 1, nz: 0 },    // left wall
+        { x: roomCX + 2.5, y: -1.35, z: B.Z1 + 0.22, nx: 0, nz: 1 },    // front wall
+    ];
+    const torchCount = isMobileProfile ? 2 : 3;
+    const bracketMat = new THREE.MeshStandardMaterial({ color: 0x2b2118, roughness: 0.9 });
+    const flameGeo = new THREE.ConeGeometry(0.07, 0.24, 8);
+    for (let i = 0; i < torchCount; i++) {
+        const s = torchSpots[i];
+        const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.2, 0.07), bracketMat);
+        bracket.position.set(s.x, s.y - 0.14, s.z);
+        scene.add(bracket);
+        castleSceneMeshes.push(bracket);
+        const flame = new THREE.Mesh(flameGeo, new THREE.MeshBasicMaterial({ color: 0xffa028 }));
+        flame.position.set(s.x, s.y, s.z);
+        scene.add(flame);
+        castleSceneMeshes.push(flame);
+        const light = new THREE.PointLight(0xff7733, 1.1, 12, 2);
+        light.castShadow = false;
+        light.position.set(s.x + s.nx * 0.35, s.y + 0.1, s.z + s.nz * 0.35);
+        scene.add(light);
+        bunkerTorches.push({ light, flame, baseI: 1.1, phase: i * 2.1 });
+    }
+
+    // Bunker flood water: sits inside the floor mesh (invisible) until the
+    // switch is pulled; the flood is driven by lerping bunkerWp.baseY.
+    bunkerWp = addWaterPlane(roomCX, roomCZ, roomW - 0.4, roomD - 0.4, 'castle', B.FLOOR_Y - 0.15);
 })();
 
 // === Front-facing cloth banners that hang from the battlements ===
@@ -7878,6 +8123,14 @@ function buildStoryBridgeEncounter() {
         markStoryBridgeBody(castleIslandGroundBody);
         syncBridgeBodySuppression(castleIslandGroundBody);
     }
+    for (const body of castleIslandStripBodies) {
+        if (!body) continue;
+        // The three extra strips around the King's Bunker footprint behave
+        // exactly like the original island slab: castle-stage only.
+        body._bridgeAttachWhenSuppressed = true;
+        markStoryBridgeBody(body);
+        syncBridgeBodySuppression(body);
+    }
     for (const body of [bridgeFlankGroundBodyLeft, bridgeFlankGroundBodyRight,
                         bridgeCenterExtGroundBodyFront, bridgeCenterExtGroundBodyBack]) {
         if (!body) continue;
@@ -9145,6 +9398,22 @@ function setStoryCastleSuppressed(suppressed) {
             attachStoryBody(body);
             if (body._storyPrevMask !== undefined) body.collisionFilterMask = body._storyPrevMask;
             body.sleep();
+        }
+    }
+
+    // King's Bunker: while the castle stage is hidden, detach the room's
+    // colliders. The island strips that frame the bunker footprint follow the
+    // original slab's bridge lifecycle instead (registered at 8124-style below).
+    for (const body of bunkerColliderBodies) {
+        if (!body) continue;
+        if (suppressed) {
+            if (body._storyPrevMask === undefined) body._storyPrevMask = body.collisionFilterMask;
+            body.collisionFilterMask = 0;
+            body.sleep();
+            detachStoryBody(body);
+        } else {
+            attachStoryBody(body);
+            if (body._storyPrevMask !== undefined) body.collisionFilterMask = body._storyPrevMask;
         }
     }
 
