@@ -113,8 +113,9 @@
     /* Card grid */
     .grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(290px, 320px));
         gap: clamp(1.2rem, 3vw, 2rem);
+        justify-content: center;
     }
 
     .card {
@@ -397,6 +398,162 @@ document.querySelectorAll(".card").forEach(card => {
     resize(); seed();
     if (!reduce) tick(); else { /* draw one static frame */ tick.call(null); }
     addEventListener("resize", () => { resize(); seed(); });
+})();
+
+/* ---- Brick-wall explosion on card click (Three.js) ----------------------- */
+(function () {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    let THREE = null;
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js';
+    s.onload = () => { THREE = window.THREE; };
+    document.head.appendChild(s);
+
+    document.querySelectorAll('.card').forEach(card => {
+        card.addEventListener('click', e => {
+            if (e.ctrlKey || e.metaKey || e.button !== 0) return; // let open-in-tab work
+            if (!THREE) return;  // Three.js still loading — href fires normally
+            e.preventDefault();
+            launchExplosion(card, e.clientX, e.clientY, card.getAttribute('href'));
+        });
+    });
+
+    function launchExplosion(card, clickX, clickY, href) {
+        const rect = card.getBoundingClientRect();
+        card.style.visibility = 'hidden';
+
+        const W = window.innerWidth, H = window.innerHeight;
+        // Camera distance chosen so 1 world-unit == 1 CSS pixel at z = 0
+        const ZDIST = 700;
+        const fov   = 2 * Math.atan2(H / 2, ZDIST) * (180 / Math.PI);
+
+        const scene    = new THREE.Scene();
+        const camera   = new THREE.PerspectiveCamera(fov, W / H, 0.1, 5000);
+        camera.position.set(0, 0, ZDIST);
+
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(W, H);
+        const cvs = renderer.domElement;
+        cvs.style.cssText = 'position:fixed;top:0;left:0;z-index:9999;pointer-events:none;';
+        document.body.appendChild(cvs);
+
+        /* Lighting */
+        scene.add(new THREE.AmbientLight(0x7799bb, 0.9));
+        const key = new THREE.DirectionalLight(0xffffff, 1.2);
+        key.position.set(200, 300, 500);
+        scene.add(key);
+        const rim = new THREE.DirectionalLight(0x4466aa, 0.5);
+        rim.position.set(-200, -100, 200);
+        scene.add(rim);
+        const flashLight = new THREE.PointLight(0xffe8aa, 6, 900);
+        flashLight.position.set(clickX - W / 2, -(clickY - H / 2), 40);
+        scene.add(flashLight);
+
+        /* Brick grid dimensions */
+        const COLS = 8, ROWS = 11, GAP = 3;
+        const bW = (rect.width  - GAP * (COLS - 1)) / COLS;
+        const bH = (rect.height - GAP * (ROWS - 1)) / ROWS;
+        const bD = bH * 0.55;
+
+        /* World-space coords: origin = screen centre, Y-up */
+        const wx0  = rect.left - W / 2;     // card left edge
+        const wy0  = H / 2 - rect.top;      // card top edge
+        const impX = clickX - W / 2;
+        const impY = -(clickY - H / 2);
+
+        /* Colour palettes: thumbnail zone (top 55%) = dark navy; body = stone blue-grey */
+        const thumbPal = [0x1e2d4a, 0x253556, 0x2c3e66, 0x182540, 0x1a2e52];
+        const bodyPal  = [0x6c7d96, 0x7a8ea5, 0x5c6c84, 0x8394aa, 0x4e5e74];
+
+        const geo    = new THREE.BoxGeometry(bW - GAP * 0.4, bH - GAP * 0.4, bD);
+        const bricks = [];
+
+        for (let r = 0; r < ROWS; r++) {
+            const palette = (r / ROWS < 0.55) ? thumbPal : bodyPal;
+            const stagger = (r % 2) * (bW / 2);
+            const brickY  = wy0 - bH / 2 - r * (bH + GAP);
+
+            for (let c = 0; c < COLS; c++) {
+                const brickX = wx0 + bW / 2 + c * (bW + GAP) + stagger;
+
+                const mat = new THREE.MeshLambertMaterial({
+                    color: palette[Math.floor(Math.random() * palette.length)]
+                });
+                mat.color.offsetHSL(0, 0, (Math.random() - 0.5) * 0.12);
+
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(brickX, brickY, 0);
+                scene.add(mesh);
+
+                /* Distance-based explosion impulse */
+                const dx   = brickX - impX;
+                const dy   = brickY - impY;
+                const dist = Math.hypot(dx, dy);
+                const safe = Math.max(dist, 50);
+                const spd  = 6000 / safe + 150 + Math.random() * 100;
+                const nx   = dx / safe, ny = dy / safe;
+
+                bricks.push({
+                    mesh,
+                    vx: nx * spd * 0.8 + (Math.random() - 0.5) * 100,
+                    vy: ny * spd * 0.8 + (Math.random() - 0.5) * 80 + 60,
+                    vz: spd * 0.4 + Math.random() * 180,
+                    ax: new THREE.Vector3(
+                        Math.random() - 0.5,
+                        Math.random() - 0.5,
+                        Math.random() - 0.5
+                    ).normalize(),
+                    ar: 0.04 + Math.random() * 0.09
+                });
+            }
+        }
+
+        /* Impact flash sphere */
+        const flashMat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
+        const flashMesh = new THREE.Mesh(new THREE.SphereGeometry(16, 10, 10), flashMat);
+        flashMesh.position.set(impX, impY, 30);
+        scene.add(flashMesh);
+
+        const GRAVITY = 360, DURATION = 1800;
+        let t0 = null, tPrev = null;
+
+        function frame(now) {
+            if (!t0) { t0 = now; tPrev = now; }
+            const elapsed = now - t0;
+            const dt = Math.min(0.05, (now - tPrev) / 1000);
+            tPrev = now;
+
+            /* Flash sphere: fade and expand quickly */
+            const fp = Math.max(0, 1 - elapsed / 280);
+            flashMat.opacity      = fp;
+            flashMesh.scale.setScalar(1 + (1 - fp) * 3.5);
+            flashLight.intensity  = fp * 6;
+
+            /* Physics step */
+            for (const b of bricks) {
+                b.vy -= GRAVITY * dt;
+                b.vz *= 0.975;
+                b.mesh.position.x += b.vx * dt;
+                b.mesh.position.y += b.vy * dt;
+                b.mesh.position.z += b.vz * dt;
+                b.mesh.rotateOnAxis(b.ax, b.ar);
+            }
+
+            renderer.render(scene, camera);
+
+            if (elapsed < DURATION) {
+                requestAnimationFrame(frame);
+            } else {
+                renderer.dispose();
+                cvs.remove();
+                window.location.href = href;
+            }
+        }
+
+        requestAnimationFrame(frame);
+    }
 })();
 </script>
 </body>

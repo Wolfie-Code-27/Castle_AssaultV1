@@ -60,7 +60,7 @@ const SHAPES = {
   trench: {
     label: 'Trench', icon: '≋',
     rotations: [
-      { id:'trench', label:'≋ Water trench', fn:'createEditorTrench', w:3.2, h:1, d:3.2, col:0x4aa6ff },
+      { id:'trench', label:'≋ Ground trench', fn:'createEditorTrench', w:0.5, h:0.7, d:0.5, col:0x795b3a },
     ],
   },
   plank: {
@@ -120,7 +120,8 @@ const st = {
   decorType: 'shrub', decorVariant: 0,
   playing: false,
   halfSnap: false,
-  trenchBrushSize: 3.2,
+  trenchBrushSize: 0.5,
+  trenchWater: false,
   trenchDrawing: false,
   trenchLastPos: null,
   topZoom: 120, topPanX: 0, topPanZ: 60,
@@ -337,7 +338,17 @@ function startGhostLoop() {
     const erase = st.tool === 'erase';
     if (st.itemType === 'brick') {
       const rot = currentRot();
-      ghost.position.set(pos.x, pos.y + rot.h * 0.5, pos.z);
+      const isTrench = st.brickShape === 'trench';
+      if (isTrench) {
+        const size = Math.max(0.5, Math.min(3, st.trenchBrushSize || 0.5));
+        const snapped = snapTrenchBrushPos(pos.x, pos.z, size);
+        const sc = size / 0.5;
+        ghost.scale.set(sc, 1, sc);
+        ghost.position.set(snapped.x, pos.y - rot.h * 0.5 + 0.08, snapped.z);
+      } else {
+        ghost.scale.set(1, 1, 1);
+        ghost.position.set(pos.x, pos.y + rot.h * 0.5, pos.z);
+      }
       if (rot.angle !== undefined || rot.quat) {
         /* Wedge ghost mirrors the face-angle snap so the preview shows the
            exact voussoir pose that will be placed. */
@@ -662,10 +673,11 @@ function placeBrick(pos) {
   const fn = api[rot.fn];
   if (!fn) return;
   if (rot.fn === 'createEditorTrench') {
-    const size = Math.max(1.2, st.trenchBrushSize || rot.w || 3.2);
-    const trench = fn(pos.x, pos.z, size, size, 1.4);
+    const size = Math.max(0.5, Math.min(3, st.trenchBrushSize || rot.w || 0.5));
+    const snapped = snapTrenchBrushPos(pos.x, pos.z, size);
+    const trench = fn(snapped.x, snapped.z, size, size, 0.7, st.trenchWater);
     if (trench) {
-      placed.push({ type: 'trench', trenchEntry: trench, size: { w: size, d: size, depth: 1.4 } });
+      placed.push({ type: 'trench', trenchEntry: trench, size: { w: size, d: size, depth: 0.7 }, water: st.trenchWater });
       setUndoState(true);
       scheduleAutosave();
     }
@@ -755,12 +767,20 @@ function trenchPointerPos() {
   return t;
 }
 
+function snapTrenchBrushPos(x, z, size) {
+  const snap = value => Math.round((Math.round(value / size) * size) * 1000) / 1000;
+  return { x: snap(x), z: snap(z) };
+}
+
 function placeTrenchStampAt(x, z) {
   const rot = currentRot();
   if (rot.fn !== 'createEditorTrench' || !api.createEditorTrench) return;
-  const size = Math.max(1.2, st.trenchBrushSize || rot.w || 3.2);
+  const size = Math.max(0.5, Math.min(3, st.trenchBrushSize || rot.w || 0.5));
+  const snapped = snapTrenchBrushPos(x, z, size);
+  x = snapped.x;
+  z = snapped.z;
 
-  const minDist = Math.max(0.45, size * 0.28);
+  const minDist = size * 0.5;
   for (let i = placed.length - 1; i >= 0; i--) {
     const p = placed[i];
     if (p.type !== 'trench' || !p.trenchEntry) continue;
@@ -768,9 +788,9 @@ function placeTrenchStampAt(x, z) {
     if (d < minDist) return;
   }
 
-  const trench = api.createEditorTrench(x, z, size, size, 1.4);
+  const trench = api.createEditorTrench(x, z, size, size, 0.7, st.trenchWater);
   if (!trench) return;
-  placed.push({ type: 'trench', trenchEntry: trench, size: { w: size, d: size, depth: 1.4 } });
+  placed.push({ type: 'trench', trenchEntry: trench, size: { w: size, d: size, depth: 0.7 }, water: st.trenchWater });
   setUndoState(true);
   scheduleAutosave();
 }
@@ -790,7 +810,7 @@ function placeTrenchStrokeStep() {
   const dx = cur.x - last.x;
   const dz = cur.y - last.y;
   const dist = Math.hypot(dx, dz);
-  const step = Math.max(0.55, (st.trenchBrushSize || 3.2) * 0.33);
+  const step = Math.max(0.15, (st.trenchBrushSize || 0.5) * 0.3);
   const n = Math.max(1, Math.floor(dist / step));
   for (let i = 1; i <= n; i++) {
     const t = i / n;
@@ -850,8 +870,8 @@ function serializeLevel() {
       items.push({ t: 'npc', p: [+gp.x.toFixed(3), +gp.z.toFixed(3)], w: p.weapon || 'sword' });
     } else if (p.type === 'trench' && p.trenchEntry) {
       const t = p.trenchEntry;
-      const size = p.size || { w: t.length || 8, d: t.width || 3, depth: t.depth || 1.4 };
-      items.push({ t: 'trench', p: [+t.x.toFixed(3), +t.z.toFixed(3)], s: [+size.w.toFixed(3), +size.d.toFixed(3), +size.depth.toFixed(3)] });
+      const size = p.size || { w: t.length || 8, d: t.width || 3, depth: t.depth || 0.7 };
+      items.push({ t: 'trench', p: [+t.x.toFixed(3), +t.z.toFixed(3)], s: [+size.w.toFixed(3), +size.d.toFixed(3), +size.depth.toFixed(3)], w: p.water === true });
     } else if (p.type === 'decor' && p.decorEntry) {
       const d = p.decorEntry;
       items.push({ t: 'decor', k: d.kind, v: d.variant, p: [+d.x.toFixed(3), +d.z.toFixed(3)] });
@@ -916,10 +936,14 @@ function restoreLevel(data) {
         n++;
       }
     } else if (it.t === 'trench' && Array.isArray(it.p) && api.createEditorTrench) {
-      const s = Array.isArray(it.s) ? it.s : [8, 3, 1.4];
-      const trench = api.createEditorTrench(it.p[0], it.p[1], s[0], s[1], s[2]);
+      const s = Array.isArray(it.s) ? it.s : [8, 3, 0.7];
+      const width = Math.max(0.5, Math.min(3, Number(s[0]) || 0.5));
+      const length = Math.max(0.5, Math.min(3, Number(s[1]) || 0.5));
+      s[2] = 0.7;
+      const withWater = it.w === true;
+      const trench = api.createEditorTrench(it.p[0], it.p[1], width, length, s[2], withWater);
       if (trench) {
-        placed.push({ type: 'trench', trenchEntry: trench, size: { w: s[0], d: s[1], depth: s[2] } });
+        placed.push({ type: 'trench', trenchEntry: trench, size: { w: width, d: length, depth: s[2] }, water: withWater });
         n++;
       }
     } else if (it.t === 'decor' && Array.isArray(it.p)) {
@@ -1205,8 +1229,9 @@ function buildUI() {
     <button id="ed-btn-place" class="ed-btn ed-btn-active">Place</button>
     <button id="ed-btn-erase" class="ed-btn">Erase</button>
     <label id="ed-trench-size-wrap" class="ed-label" style="display:none">
-      Brush <input id="ed-trench-size" type="range" min="1.2" max="8" step="0.2" value="3.2" class="ed-range">
-      <span id="ed-trench-size-val">3.2</span>m
+      Brush <input id="ed-trench-size" type="range" min="0.5" max="3" step="0.1" value="0.5" class="ed-range">
+      <span id="ed-trench-size-val">0.5</span>m
+      <button id="ed-trench-water-btn" class="ed-btn" title="Toggle water fill" style="margin-left:6px;padding:2px 8px;font-size:11px">💧 Water</button>
     </label>
     <div class="ed-sep"></div>
 
@@ -1267,10 +1292,27 @@ function buildUI() {
   const trenchSizeInput = document.getElementById('ed-trench-size');
   if (trenchSizeInput) {
     trenchSizeInput.addEventListener('input', e => {
-      st.trenchBrushSize = Math.max(1.2, Math.min(8, parseFloat(e.target.value) || 3.2));
+      st.trenchBrushSize = Math.max(0.5, Math.min(3, parseFloat(e.target.value) || 0.5));
       const val = document.getElementById('ed-trench-size-val');
       if (val) val.textContent = st.trenchBrushSize.toFixed(1);
       updateBadge();
+    });
+  }
+  const trenchWaterBtn = document.getElementById('ed-trench-water-btn');
+  if (trenchWaterBtn) {
+    trenchWaterBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      st.trenchWater = !st.trenchWater;
+      trenchWaterBtn.classList.toggle('ed-btn-active', st.trenchWater);
+      trenchWaterBtn.textContent = st.trenchWater ? '\uD83D\uDCA7 Water' : '\uD83E\uDEB8 Dry';
+      for (const item of placed) {
+        if (item.type !== 'trench' || !item.trenchEntry) continue;
+        item.water = st.trenchWater;
+      }
+      api.setAllEditorTrenchWater?.(st.trenchWater);
+      scheduleAutosave();
+      updateBadge();
+      if (st.view === '3d') api.renderer.domElement.requestPointerLock();
     });
   }
 
@@ -1511,11 +1553,16 @@ function updateTrenchBrushUi() {
   const wrap = document.getElementById('ed-trench-size-wrap');
   const input = document.getElementById('ed-trench-size');
   const val = document.getElementById('ed-trench-size-val');
+  const waterBtn = document.getElementById('ed-trench-water-btn');
   if (!wrap || !input || !val) return;
   const show = st.itemType === 'brick' && st.brickShape === 'trench';
   wrap.style.display = show ? 'flex' : 'none';
   input.value = String(st.trenchBrushSize.toFixed(1));
   val.textContent = st.trenchBrushSize.toFixed(1);
+  if (waterBtn) {
+    waterBtn.classList.toggle('ed-btn-active', st.trenchWater);
+    waterBtn.textContent = st.trenchWater ? '\uD83D\uDCA7 Water' : '\uD83E\uDEB8 Dry';
+  }
 }
 
 function updateBadge() {
@@ -1525,7 +1572,7 @@ function updateBadge() {
     const rot = currentRot();
     const rotHint = sh && sh.rotations.length > 1 ? '  [R=rotate]' : '';
     const snapHint = st.halfSnap ? '  [H=1/2 snap]' : '  [H=full snap]';
-    const brushHint = st.brickShape === 'trench' ? `  [Brush ${st.trenchBrushSize.toFixed(1)}m]` : '';
+    const brushHint = st.brickShape === 'trench' ? `  [Brush ${st.trenchBrushSize.toFixed(1)}m | ${st.trenchWater ? 'Water' : 'Dry'}]` : '';
     b.textContent = `${sh?.icon || '🧱'} ${sh?.label} — ${rot.label}${rotHint}${snapHint}${brushHint}`;
   } else if (st.itemType === 'decor') {
     const def = DECOR_DEFS[st.decorType];
