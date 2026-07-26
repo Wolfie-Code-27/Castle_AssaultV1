@@ -10304,6 +10304,8 @@ function buildNPC(xPos, zPos, yBase = 0, facingAngle = Math.PI, weaponType = 'sw
         axe.rotation.set(0.55, 0, 0.2);
         addPart(axe, armR.sh, 0.06, -0.44, 0.11, 0.22, 0.62, 0.14, 2,
             { parent: armR.iHand, self: [0, -0.26, 0], onParent: [0.04, 0.0, 0.03] });
+    } else if (weaponType === 'none') {
+        // Unarmed (the King) — he throws punches, not steel.
     } else {
         // Sword: blade + crossguard + grip + pommel, merged into one piece.
         const blade  = new THREE.BoxGeometry(0.045, 0.85, 0.11).translate(0, 0.35, 0);
@@ -10404,6 +10406,148 @@ TOWER_CENTERS.forEach(({ cx, cz }) => {
     guard.storyRole = 'castle';
     initTowerGuardPost(guard, cx, cz, angle, TOWER_TOP_Y);
 });
+
+// === The King on his throne (King's Bunker) ===
+// A comically fat, crowned, permanently-seated NPC. storyRole 'castleKing'
+// keeps him out of the castle defender count (his death is an optional
+// bonus), and he is excluded from the drawbridge-aggro march.
+let kingPunchT = 0, kingPunchCooldown = 0, kingPunchKind = 'R';
+const KING_PUNCH_DUR = 0.45;
+(function buildKingNPC() {
+    king = buildNPC(BUNKER.THRONE_X, BUNKER.THRONE_Z, BUNKER.FLOOR_Y, Math.PI / 2, 'none');
+    king.storyRole = 'castleKing';
+    king.isBunkerKing = true;
+    king.walking = false;
+
+    // Comically fat: scale the torso mesh and widen its ragdoll box to match.
+    const torso = king.parts[0];
+    torso.mesh.scale.set(1.65, 1.12, 1.55);
+    torso.hw *= 1.6;
+    torso.hd *= 1.5;
+    torso.mesh.material.color.set(0x7a1f2b);   // royal crimson
+
+    // Crown: swap the helmet part's geometry/material in place — it stays a
+    // no-joint part, so the crown still flies off when he ragdolls.
+    const crownMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.9, roughness: 0.25, emissive: 0x2a1e00 });
+    const crownGeos = [new THREE.CylinderGeometry(0.20, 0.21, 0.11, 12)];
+    for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2;
+        crownGeos.push(new THREE.ConeGeometry(0.035, 0.13, 6).translate(Math.cos(a) * 0.185, 0.11, Math.sin(a) * 0.185));
+    }
+    const helm = king.parts[2];
+    helm.mesh.geometry.dispose();
+    helm.mesh.geometry = mergeGeometries(crownGeos);
+    helm.mesh.material = crownMat;
+    castleSceneMeshes.push(king.group);
+
+    // Throne: heavy dark-wood chair with gold trim. Separate from the NPC so
+    // the flood can float king + chair as one piece.
+    throneGroup = new THREE.Group();
+    const woodT = new THREE.MeshStandardMaterial({ color: 0x4a2f1a, roughness: 0.8 });
+    const goldT = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.85, roughness: 0.3 });
+    const addBox = (w, h, d, x, y, z, mat = woodT) => {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+        m.position.set(x, y, z);
+        m.castShadow = true;
+        throneGroup.add(m);
+        return m;
+    };
+    addBox(0.70, 0.50, 0.95, 0, 0.30, 0);                 // seat (top y=0.55)
+    addBox(0.12, 1.50, 0.95, -0.34, 1.05, 0);             // tall back
+    addBox(0.55, 0.12, 0.12, -0.02, 0.78, 0.50);          // armrest L
+    addBox(0.55, 0.12, 0.12, -0.02, 0.78, -0.50);         // armrest R
+    addBox(0.14, 0.07, 0.99, -0.34, 1.83, 0, goldT);      // back top trim
+    addBox(0.72, 0.06, 0.97, 0, 0.56, 0, goldT);          // seat trim
+    for (const fin of [-0.42, 0.42]) {
+        const finial = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 6), goldT);
+        finial.position.set(-0.34, 1.90, fin);
+        throneGroup.add(finial);
+    }
+    throneGroup.position.set(BUNKER.THRONE_X, BUNKER.FLOOR_Y, BUNKER.THRONE_Z);
+    scene.add(throneGroup);
+    castleSceneMeshes.push(throneGroup);
+
+    // The switch beside the throne (lever the king pulls at 20 s).
+    const leverBase = addBox(0.16, 0.55, 0.16, 0.10, 0.28, 0.85, goldT);
+    leverBase.castShadow = false;
+    const leverArm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.42, 0.05), woodT);
+    leverArm.geometry.translate(0, 0.21, 0);
+    leverArm.position.set(0.10, 0.55, 0.85);
+    leverArm.rotation.x = -0.6;
+    throneGroup.add(leverArm);
+    throneGroup.userData.leverArm = leverArm;
+})();
+
+// Per-frame seated pose. MUST early-return on ragdoll: pinning limbs/position
+// after activateRagdoll hides the group is what froze the old version.
+function updateKingPose(dt) {
+    if (!king || king.isRagdoll || !throneGroup) return;
+    // Ride the throne (it floats during the flood).
+    king.group.position.set(throneGroup.position.x, throneGroup.position.y, throneGroup.position.z);
+    king.group.rotation.y = Math.PI / 2;
+    const tNow = performance.now() * 0.001;
+    // Seated: thighs forward, feet comically dangling; gentle breathing.
+    king.anim.legL.rotation.x = -0.9;
+    king.anim.legR.rotation.x = -0.9;
+    const torsoMesh = king.parts[0].mesh;
+    torsoMesh.scale.y = 1.12 + Math.sin(tNow * 1.8) * 0.012;
+    if (kingPunchT > 0) {
+        const p = 1 - kingPunchT / KING_PUNCH_DUR;
+        const wave = Math.sin(p * Math.PI);
+        if (kingPunchKind === 'KICK') {
+            king.anim.legR.rotation.x = -0.9 - wave * 1.1;
+        } else if (kingPunchKind === 'L') {
+            king.anim.armL.rotation.x = -0.55 - wave * 1.9;
+        } else {
+            king.anim.armR.rotation.x = -0.55 - wave * 1.9;
+        }
+    } else {
+        king.anim.armL.rotation.x += (-0.55 - king.anim.armL.rotation.x) * Math.min(1, dt * 10);
+        king.anim.armR.rotation.x += (-0.55 - king.anim.armR.rotation.x) * Math.min(1, dt * 10);
+    }
+}
+
+// Punch/kick triggers + the optional kill bonus. Damage mirrors the walking
+// knights' melee (one heart + shove), but the king never stands up.
+function updateKingAI(dt) {
+    if (!king) return;
+    if (king.isRagdoll) {
+        if (!king._bonusAwarded) {
+            king._bonusAwarded = true;
+            score += KING_BONUS_SCORE;
+            updateUI();
+            const gp = king.group.position;
+            spawnScorePopup(gp.x, gp.y + 2.0, gp.z, '+' + KING_BONUS_SCORE + ' KING SLAIN', null);
+        }
+        return;
+    }
+    if (kingPunchCooldown > 0) kingPunchCooldown -= dt;
+    if (kingPunchT > 0) {
+        kingPunchT -= dt;
+        if (!king._punchHitDone && kingPunchT <= KING_PUNCH_DUR * 0.5) {
+            king._punchHitDone = true;
+            const dx = camera.position.x - king.group.position.x;
+            const dz = camera.position.z - king.group.position.z;
+            const d = Math.hypot(dx, dz);
+            if (d < KING_PUNCH_RANGE + 0.3 && bunkerState.phase === 'inside') {
+                onPlayerHitFrom(king.group.position);
+                const len = d || 1;
+                camera.position.x += (dx / len) * 0.9;
+                camera.position.z += (dz / len) * 0.9;
+            }
+        }
+        return;
+    }
+    if (bunkerState.phase !== 'inside' || disarmNpc) return;
+    const dx = camera.position.x - king.group.position.x;
+    const dz = camera.position.z - king.group.position.z;
+    if (Math.hypot(dx, dz) < KING_PUNCH_RANGE && kingPunchCooldown <= 0) {
+        kingPunchT = KING_PUNCH_DUR;
+        king._punchHitDone = false;
+        kingPunchKind = ['L', 'R', 'KICK'][(Math.random() * 3) | 0];
+        kingPunchCooldown = KING_PUNCH_COOLDOWN;
+    }
+}
 
 // === Knight+ ballista encounter ===
 let ballista = null;
@@ -13378,7 +13522,7 @@ function advanceToCastleStage() {
     setStoryBridgeSuppressed(true);
     setStoryCastleSuppressed(false);
     for (const npc of npcList) {
-        if (npc.storyRole === 'castle') {
+        if (npc.storyRole === 'castle' || npc.storyRole === 'castleKing') {
             setNpcStoryDormant(npc, false);
         } else if (npc.storyRole === 'bridge') {
             setNpcStoryDormant(npc, true);
@@ -20384,7 +20528,7 @@ function animate() {
         if (dbAngle <= 0) {
             // Bridge fully down � courtyard NPCs march out through gate, fanning out
             for (const npc of npcList) {
-                if (!npc.isRagdoll && !npc.isTowerGuard && !npc.walking && !npc.storyDormant && !npc.storyBridgeWalker) {
+                if (!npc.isRagdoll && !npc.isTowerGuard && !npc.walking && !npc.storyDormant && !npc.storyBridgeWalker && !npc.isBunkerKing) {
                     npc.walking   = true;
                     npc.clearedBridge = false;
                     npc.bridgeTurnLock = false;
