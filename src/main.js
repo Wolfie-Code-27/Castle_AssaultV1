@@ -2780,12 +2780,10 @@ const BUNKER_FLOOD_DELAY_SEC = 20, BUNKER_FLOOD_RISE_SEC = 60, BUNKER_WATER_MAX_
 const MOAT_DRAIN_SEC = 6, MOAT_DRAINED_Y = -1.55;   // just under the trench floor top (-1.4)
 const KING_PUNCH_RANGE = 2.0, KING_PUNCH_COOLDOWN = 2.5;
 
-// Physical floor height along the descent: stairwell ramp -> tunnel ramp -> chamber.
+// Physical floor height along the descent: the stairwell is a VERTICAL shaft
+// with a flat landing (ladder-only exit); the tunnel beyond keeps its slope.
 function bunkerFloorYAt(pz) {
-    if (pz <= BUNKER.OPEN_Z2) {
-        const t = THREE.MathUtils.clamp((pz - BUNKER.OPEN_Z1) / (BUNKER.OPEN_Z2 - BUNKER.OPEN_Z1), 0, 1);
-        return THREE.MathUtils.lerp(BUNKER.RAMP1_TOP, BUNKER.RAMP1_BOT, t);
-    }
+    if (pz <= BUNKER.OPEN_Z2) return BUNKER.RAMP1_BOT;
     if (pz <= BUNKER.TUNNEL_Z2) {
         const t = (pz - BUNKER.OPEN_Z2) / (BUNKER.TUNNEL_Z2 - BUNKER.OPEN_Z2);
         return THREE.MathUtils.lerp(BUNKER.RAMP1_BOT, BUNKER.FLOOR_Y, t);
@@ -3032,8 +3030,8 @@ addGround((BUNKER.X2 + _MIX2) / 2, (BUNKER.OPEN_Z1 + BUNKER.Z2) / 2, _MIX2 - BUN
             world.addBody(body);
             bunkerColliderBodies.push(body);
         };
-        rampBody(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z1, B.OPEN_Z2, B.RAMP1_TOP, B.RAMP1_BOT);   // stairwell
         rampBody(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z2, B.TUNNEL_Z2, B.RAMP1_BOT, B.FLOOR_Y);   // tunnel
+        bunkerColliderBodies.push(slab(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z1, B.OPEN_Z2, B.RAMP1_BOT));  // shaft landing (flat)
         bunkerColliderBodies.push(slab(B.X1, B.X2, B.TUNNEL_Z2, B.Z2, B.FLOOR_Y));        // chamber floor
         // Walls: chamber sides + far end, from below the floor up to y=0.
         const wallH = 0 - (B.FLOOR_Y - 0.6), wallCY = (B.FLOOR_Y - 0.6) / 2;
@@ -6312,8 +6310,12 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
         scene.add(m);
         castleSceneMeshes.push(m);
     };
-    rampMesh(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z1, B.OPEN_Z2, B.RAMP1_TOP, B.RAMP1_BOT);
-    rampMesh(B.X1, B.X2, B.OPEN_Z2, B.TUNNEL_Z2, B.RAMP1_BOT, B.FLOOR_Y);
+    rampMesh(B.OPEN_X1, B.OPEN_X2, B.OPEN_Z2, B.TUNNEL_Z2, B.RAMP1_BOT, B.FLOOR_Y);
+    const landing = new THREE.Mesh(new THREE.BoxGeometry(B.OPEN_X2 - B.OPEN_X1, 0.2, B.OPEN_Z2 - B.OPEN_Z1), bunkerFloorMat);
+    landing.position.set(B.TRAPDOOR_X, B.RAMP1_BOT - 0.1, B.TRAPDOOR_Z);
+    landing.receiveShadow = true;
+    scene.add(landing);
+    castleSceneMeshes.push(landing);
     const floorMesh = new THREE.Mesh(new THREE.BoxGeometry(B.X2 - B.X1, 0.2, B.Z2 - B.TUNNEL_Z2), bunkerFloorMat);
     floorMesh.position.set((B.X1 + B.X2) / 2, B.FLOOR_Y - 0.1, (B.TUNNEL_Z2 + B.Z2) / 2);
     floorMesh.receiveShadow = true;
@@ -6358,30 +6360,26 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     scene.add(dais);
     castleSceneMeshes.push(dais);
 
-    // Ladder down the east lining wall of the stairwell (visual only — the
-    // ramp itself is what you walk on).
+    // The ladder: VERTICAL, centred in the shaft — the only way in and out
+    // (visual; the E-key climb is the mechanism).
     {
         const ladderMat = new THREE.MeshStandardMaterial({ color: 0x5a4022, roughness: 0.85 });
-        const topZ = B.OPEN_Z1 + 0.35, topY = 0.18;
-        const botZ = B.OPEN_Z2 - 0.35, botY = B.RAMP1_BOT + 0.1;
-        const len = Math.hypot(botZ - topZ, botY - topY);
-        const ang = Math.atan2(botY - topY, botZ - topZ);
+        const topY = 0.55, botY = B.RAMP1_BOT;   // pokes just above the hall floor
+        const len = topY - botY;
         const geos = [];
-        const railGeo = new THREE.BoxGeometry(0.055, 0.05, len);
-        for (const rx of [-0.24, 0.24]) {
-            const g = railGeo.clone();
-            g.translate(rx, 0, len / 2);
+        for (const rx of [-0.26, 0.26]) {
+            const g = new THREE.BoxGeometry(0.06, len, 0.06);
+            g.translate(rx, botY + len / 2, 0);
             geos.push(g);
         }
         const rungCount = Math.floor(len / 0.36);
-        for (let i = 1; i < rungCount; i++) {
-            const g = new THREE.BoxGeometry(0.48, 0.045, 0.05);
-            g.translate(0, 0, i * 0.36);
+        for (let i = 0; i < rungCount; i++) {
+            const g = new THREE.BoxGeometry(0.52, 0.05, 0.06);
+            g.translate(0, botY + 0.24 + i * 0.36, 0);
             geos.push(g);
         }
         const ladder = new THREE.Mesh(mergeGeometries(geos), ladderMat);
-        ladder.position.set(B.OPEN_X2 - 0.30, topY, topZ);
-        ladder.rotation.x = -ang;
+        ladder.position.set(B.TRAPDOOR_X, 0, B.TRAPDOOR_Z);
         scene.add(ladder);
         castleSceneMeshes.push(ladder);
     }
@@ -6585,8 +6583,8 @@ function getInteractContext() {
         if (hasKey) return { id: 'trapdoor-unlock', text: 'Unlock the trapdoor' };
         return { id: 'trapdoor-locked', text: 'Locked — find the key' };
     }
-    // inside: climbing out happens at the ladder base
-    const dLadder = Math.hypot(camera.position.x - (BUNKER.OPEN_X2 - 0.5), camera.position.z - (BUNKER.OPEN_Z2 - 0.5));
+    // inside: climbing out happens at the ladder base in the shaft
+    const dLadder = Math.hypot(camera.position.x - BUNKER.TRAPDOOR_X, camera.position.z - BUNKER.TRAPDOOR_Z);
     if (dLadder < 1.7 && !playerWaterState && trapdoor.state === 'open') return { id: 'hatch-ascend', text: 'Climb up the ladder' };
     return null;
 }
@@ -6638,18 +6636,17 @@ function flashInteractPrompt() {
     interactPromptEl.classList.add('flash');
 }
 
-// Scripted ladder climb: two smoothstep segments (to the ladder line, then the
-// climb itself) with input suspended and mouse look live. Walking the ramp
-// also works — the ladder climb is the polished option.
-const LADDER_TOP = { x: 0.9, z: 75.8 }, LADDER_BASE = { x: 1.0, z: 80.5 };
+// Scripted ladder climb: two smoothstep segments (to the shaft centre, then
+// the vertical climb) with input suspended and mouse look live. The ladder is
+// the only way in and out of the shaft; the tunnel slope beyond is walked.
 function beginBunkerTransition(dir) {
+    const B = BUNKER;
     bunkerState.from.copy(camera.position);
+    bunkerState.via.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.TRAPDOOR_Z);
     if (dir === 'down') {
-        bunkerState.via.set(LADDER_TOP.x, PLAYER_BASE_Y, LADDER_TOP.z);
-        bunkerState.to.set(LADDER_BASE.x, BUNKER.RAMP1_BOT + PLAYER_BASE_Y, LADDER_BASE.z);
+        bunkerState.to.set(B.TRAPDOOR_X, B.RAMP1_BOT + PLAYER_BASE_Y, B.TRAPDOOR_Z);
     } else {
-        bunkerState.via.set(LADDER_TOP.x, PLAYER_BASE_Y, LADDER_TOP.z);
-        bunkerState.to.set(BUNKER.TRAPDOOR_X, PLAYER_BASE_Y, BUNKER.OPEN_Z1 - 1.0);
+        bunkerState.to.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.OPEN_Z1 - 1.0);
     }
     bunkerState.seg = 0;
     bunkerState.t = 0;
@@ -18111,6 +18108,52 @@ function flushScorePopup() {
     _popAccum = 0;
 }
 
+// Player XZ movement with wall collision. Two gates, both grounded-only so
+// jumps stay free: (1) analytic rise gate — the target floor may not be more
+// than ~1.45 m above the camera (bridge masonry steps are ≤1.15, the drained
+// moat lip is 1.4); (2) a short horizontal waist-height ray against physics
+// bodies — brick castle walls, hut planks, bunker walls. Axis-separated so
+// the player slides along walls instead of sticking to them.
+const _wallRayFrom = new CANNON.Vec3();
+const _wallRayTo = new CANNON.Vec3();
+const _wallRayOpts = { collisionFilterMask: -1, skipBackfaces: true };
+const _wallRayRc = new CANNON.RaycastResult();
+function playerWallBlocks(fx, fy, fz, tx, tz) {
+    const dx = tx - fx, dz = tz - fz;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) return false;
+    const nx = dx / len, nz = dz / len;
+    const perpX = -nz * 0.25, perpZ = nx * 0.25;   // fan of 3 rays covers brick seams
+    for (let i = -1; i <= 1; i++) {
+        _wallRayFrom.set(fx + perpX * i, fy, fz + perpZ * i);
+        _wallRayTo.set(tx + perpX * i + nx * 0.30, fy, tz + perpZ * i + nz * 0.30);
+        _wallRayRc.reset();
+        world.raycastClosest(_wallRayFrom, _wallRayTo, _wallRayOpts, _wallRayRc);
+        if (_wallRayRc.hasHit) return true;
+    }
+    return false;
+}
+function applyPlayerXZMove(move) {
+    const px = camera.position.x, py = camera.position.y, pz = camera.position.z;
+    const nx = px + move.x, nz = pz + move.z;
+    if (!playerOnGround) {
+        camera.position.x = nx;
+        camera.position.z = nz;
+        return;
+    }
+    const waistY = py - 1.0;
+    const free = (tx, tz) =>
+        (getPlayerFloorY(tx, tz) - py) <= 1.45 && !playerWallBlocks(px, waistY, pz, tx, tz);
+    if (free(nx, nz)) {
+        camera.position.x = nx;
+        camera.position.z = nz;
+    } else if (free(nx, pz)) {
+        camera.position.x = nx;
+    } else if (free(px, nz)) {
+        camera.position.z = nz;
+    }
+}
+
 function animate() {
     requestAnimationFrame(animate);
     const frameStartAt = _perfDebugEnabled ? performance.now() : 0;
@@ -18298,7 +18341,7 @@ function animate() {
         if (Math.abs(moveRightInput) > 0.001) move.addScaledVector(right, moveRightInput);
         if (move.lengthSq() > 0) {
             move.normalize().multiplyScalar(MOVE_SPEED * waterDrag * dt);
-            camera.position.addScaledVector(move, 1);
+            applyPlayerXZMove(move);
         }
     }
 
