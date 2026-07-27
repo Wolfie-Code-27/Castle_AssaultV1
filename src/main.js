@@ -6959,43 +6959,19 @@ const towerPlatforms = [];
     }
 })();
 
-// Thatch (straw) roof texture + materials for the hut roof, gables and chimney.
-function makeThatchTexture() {
-    const W = 256, H = 128;
-    const c = document.createElement('canvas'); c.width = W; c.height = H;
-    const x = c.getContext('2d');
-    x.fillStyle = '#9c7b34'; x.fillRect(0, 0, W, H);
-    // Horizontal straw courses
-    for (let y = 0; y < H; y += 10) {
-        const sh = (30 + Math.random()*40) | 0;
-        x.fillStyle = `rgba(${60+sh},${45+sh},${(15+sh*0.5)|0},0.5)`;
-        x.fillRect(0, y, W, 7);
-    }
-    // Vertical straw striations
-    for (let i = 0; i < 600; i++) {
-        const px = Math.random()*W, py = Math.random()*H;
-        const len = 5 + Math.random()*14;
-        const v = (Math.random()*70) | 0;
-        x.strokeStyle = `rgba(${120+v},${95+v},${(40+v*0.4)|0},0.35)`;
-        x.lineWidth = Math.random()*1.4 + 0.3;
-        x.beginPath(); x.moveTo(px, py); x.lineTo(px+(Math.random()-0.5)*3, py+len); x.stroke();
-    }
-    const t = new THREE.CanvasTexture(c);
-    t.wrapS = t.wrapT = THREE.RepeatWrapping;
-    return t;
-}
-const thatchTex  = makeThatchTexture();
-const thatchMat  = new THREE.MeshStandardMaterial({ map: thatchTex, roughness: 0.95, metalness: 0.0 });
-const plasterMat = new THREE.MeshStandardMaterial({ color: 0xd8c9a6, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide });
-const stoneMat   = new THREE.MeshStandardMaterial({ color: 0x8a8479, roughness: 0.9, metalness: 0.0 });
+// (The hut is all wood now — the old thatch/plaster/stone hut materials went
+// with the brick-built version.)
 
-// Plank size ? half the castle brick
+// Plank size ? half the castle brick. PT = board thickness (rough-sawn siding,
+// half the old masonry depth — reads as wood, not brick).
 const PS = { w: BS.w * 0.75, h: BS.h * 0.75, d: BS.d * 0.75 };
+const PT = PS.d * 0.5;
 
-// Separate InstancedMesh pair for house planks (wood material)
+// Separate InstancedMesh pair for house planks (wood material). Board LENGTH
+// varies per instance via matrix scale on the length axis (PS.w is the unit).
 const MAX_PLANKS = 800;
-const plankGeoX  = new THREE.BoxGeometry(PS.w, PS.h, PS.d);
-const plankGeoZ  = new THREE.BoxGeometry(PS.d, PS.h, PS.w);
+const plankGeoX  = new THREE.BoxGeometry(PS.w, PS.h, PT);
+const plankGeoZ  = new THREE.BoxGeometry(PT, PS.h, PS.w);
 const plankInstX = new THREE.InstancedMesh(plankGeoX, woodPlankMat, MAX_PLANKS);
 const plankInstZ = new THREE.InstancedMesh(plankGeoZ, woodPlankMat, MAX_PLANKS);
 plankInstX.castShadow = true; plankInstX.receiveShadow = true;
@@ -7008,36 +6984,41 @@ scene.add(plankInstX); scene.add(plankInstZ);
 // Track planks separately so they sync correctly
 const planks = [];
 
-function createPlank(x, y, z, isZ = false) {
+// One long siding board (old-western shed style). lenMeters runs along the
+// board's length axis (x for front/back walls, z for sides); the shared unit
+// geometry is stretched per instance via matrix scale.
+function createPlank(x, y, z, isZ = false, lenMeters = PS.w) {
     const idx = isZ ? plankInstZ.count++ : plankInstX.count++;
+    const lenScale = lenMeters / PS.w;
     _iDummy.position.set(x, y, z);
     _iDummy.quaternion.set(0, 0, 0, 1);
+    _iDummy.scale.set(isZ ? 1 : lenScale, 1, isZ ? lenScale : 1);
     _iDummy.updateMatrix();
+    _iDummy.scale.set(1, 1, 1);
     if (isZ) { plankInstZ.setMatrixAt(idx, _iDummy.matrix); plankInstZ.instanceMatrix.needsUpdate = true; }
     else      { plankInstX.setMatrixAt(idx, _iDummy.matrix); plankInstX.instanceMatrix.needsUpdate = true; }
 
-    // Castle-wall logic applied to planks: trim the collider a touch along the
-    // plank's LENGTH axis so neighbours in a course don't weld into one rigid
-    // chain (which made a single hit ripple/explode the whole hut), and use
-    // heavier damping + the same sleep thresholds as the walls so the structure
-    // settles solidly and rests instead of jittering.
-    const lenHalf = PS.w/2 - 0.04;   // length axis half-extent, with a hair of gap
+    // Long, heavy, sleepy boards: a light knock rattles ONE board loose instead
+    // of rippling the whole hut down. Length collider is trimmed a hair so
+    // stacked courses never weld into a single rigid chain.
+    const lenHalf = lenMeters / 2 - 0.06;
     const shape = isZ
-        ? new CANNON.Box(new CANNON.Vec3(PS.d/2, PS.h/2, lenHalf))
-        : new CANNON.Box(new CANNON.Vec3(lenHalf, PS.h/2, PS.d/2));
+        ? new CANNON.Box(new CANNON.Vec3(PT / 2, PS.h / 2, lenHalf))
+        : new CANNON.Box(new CANNON.Vec3(lenHalf, PS.h / 2, PT / 2));
     const body = new CANNON.Body({
-        mass: 80,
+        mass: Math.round(42 * lenMeters),
         material: brickPhysMat,
         shape,
-        allowSleep: true, sleepSpeedLimit: 0.35, sleepTimeLimit: 0.6,
-        linearDamping: 0.36, angularDamping: 0.64,
+        allowSleep: true, sleepSpeedLimit: 0.55, sleepTimeLimit: 0.45,
+        linearDamping: 0.50, angularDamping: 0.80,
         collisionFilterGroup: CGROUP_BRICK, collisionFilterMask: -1 ^ CGROUP_BRIDGE
     });
     body.position.set(x, y, z);
     body._storyRole = 'castle';
+    body._isPlank = true;   // wood (not stone) impact sound
     world.addBody(body);
     body.sleep();
-    planks.push({ idx, isZ, body, ix: x, iy: y, iz: z, scored: false, isPlank: true, grp: CGROUP_BRICK, storyRole: 'castle' });
+    planks.push({ idx, isZ, body, ix: x, iy: y, iz: z, lenScale, scored: false, isPlank: true, grp: CGROUP_BRICK, storyRole: 'castle' });
     bricks.push(planks[planks.length - 1]); // also add to bricks for blast/wake checks
 }
 
@@ -7051,27 +7032,41 @@ function buildWoodenHouse(cx, cz) {
     const WIN_A = 2;
     const WIN_B = D - 2;
 
+    // Long horizontal siding boards, lap-staggered per course like an old
+    // western shed. Board = one physics body; gaps preserve the door, the
+    // charger's exit lane, and one window slit per side wall.
+    const wallL = W * PS.w;
+    const xL = cx - wallL / 2, xR = cx + wallL / 2;
+    const doorXL = cx - (DOOR_W * PS.w) / 2, doorXR = cx + (DOOR_W * PS.w) / 2;
+    const boardX = (x0, x1, y, z) => createPlank((x0 + x1) / 2, y, z, false, x1 - x0);
+    const boardZ = (z0, z1, y, x) => createPlank(x, y, (z0 + z1) / 2, true, z1 - z0);
+    const sideZ0 = cz + PS.d / 2, sideZ1 = cz + D * PS.d - PS.d / 2;
+    const sideXL = xL + PS.d / 2, sideXR = xR - PS.d / 2;
     for (let r = 0; r < ROWS; r++) {
-        const y = PS.h/2 + r * PS.h;
-        // Front wall with a tall centred door opening (no row stagger � clean flush walls).
-        for (let i = 0; i < W; i++) {
-            const px = cx - (W * PS.w)/2 + PS.w/2 + i * PS.w;
-            if (r < DOOR_H && i >= doorMinX && i <= doorMaxX) continue;
-            createPlank(px, y, cz, false);
+        const y = PS.h / 2 + r * PS.h;
+        const lap = (r % 2 ? -1 : 1) * PS.w;   // stagger the butt joints per course
+        // Front wall: boards flank the tall centred door; full courses above it.
+        if (r < DOOR_H) {
+            boardX(xL, doorXL, y, cz);
+            boardX(doorXR, xR, y, cz);
+        } else {
+            boardX(xL, cx + lap, y, cz);
+            boardX(cx + lap, xR, y, cz);
         }
-        // Back wall.
-        for (let i = 0; i < W; i++) {
-            const px = cx - (W * PS.w)/2 + PS.w/2 + i * PS.w;
-            createPlank(px, y, cz + D * PS.d, false);
-        }
-        // Side walls with dual slits and an open interior charge lane near door.
-        for (let j = 1; j < D; j++) {
-            const pz = cz + PS.d/2 + (j-0.5) * PS.d;
-            if (pz < cz || pz > cz + D * PS.d) continue;
-            const isWin = (r >= 2 && r <= 4 && (j === WIN_A || j === WIN_B));
-            const clearLane = (j === 1 && r < DOOR_H);
-            if (!isWin && !clearLane) createPlank(cx - (W * PS.w)/2 + PS.d/2, y, pz, true);
-            if (!isWin && !clearLane) createPlank(cx + (W * PS.w)/2 - PS.d/2, y, pz, true);
+        // Back wall: two lapped boards per course.
+        boardX(xL, cx - lap, y, cz + D * PS.d);
+        boardX(cx - lap, xR, y, cz + D * PS.d);
+        // Side walls: charge lane gap near the door below door height, a
+        // two-course window slit mid-wall, full boards up top.
+        for (const sx of [sideXL, sideXR]) {
+            if (r < 2) {
+                boardZ(cz + PS.d * 1.5, sideZ1, y, sx);            // lane kept clear
+            } else if (r < DOOR_H) {
+                boardZ(cz + PS.d * 2.5, cz + PS.d * 3.5, y, sx);   // stub between windows
+                boardZ(cz + PS.d * 4.5, sideZ1, y, sx);            // rear of the slit
+            } else {
+                boardZ(sideZ0, sideZ1, y, sx);
+            }
         }
     }
 
@@ -7154,26 +7149,6 @@ function buildWoodenHouse(cx, cz) {
         });
     }
 
-    // Stone quoin blocks: 2-row cube-brick fills at each corner base.
-    // Contrasts with the dark timber posts and anchors the building visually.
-    const quoinS = PS.d * 1.1;  // ~0.825 m cube
-    const quoinCorners = [
-        [cx - hutW/2 + quoinS*0.5 - cPr, cz + quoinS*0.5 - cPr],
-        [cx + hutW/2 - quoinS*0.5 + cPr, cz + quoinS*0.5 - cPr],
-        [cx - hutW/2 + quoinS*0.5 - cPr, cz + hutD - quoinS*0.5 + cPr],
-        [cx + hutW/2 - quoinS*0.5 + cPr, cz + hutD - quoinS*0.5 + cPr],
-    ];
-    for (const [qx, qz] of quoinCorners) {
-        for (let qr = 0; qr < 2; qr++) {
-            const qy = quoinS * 0.5 + qr * quoinS;
-            const qm = new THREE.Mesh(new THREE.BoxGeometry(quoinS, quoinS, quoinS), stoneMat);
-            qm.castShadow = true; qm.receiveShadow = true;
-            qm.position.set(qx, qy, qz);
-            scene.add(qm);
-            markCastleMesh(qm);
-        }
-    }
-
     const beamF = new THREE.Mesh(new THREE.BoxGeometry(hutW + PS.d*0.25, PS.h*0.45, PS.d*0.62), frameMat);
     beamF.castShadow = true; beamF.position.set(cx, eaveBeamY, cz + PS.d*0.15);
     scene.add(beamF);
@@ -7228,10 +7203,12 @@ function buildWoodenHouse(cx, cz) {
     const angle     = Math.atan2(ridgeRise, run);
     const panelLenX = hutW + 2 * ovX;
 
-    const roofTex = thatchTex.clone();
-    roofTex.repeat.set(panelLenX / 2.2, slopeLen / 2.2);
+    // Weathered board roof (was thatch): plank texture run across the slope.
+    const roofTex = woodPlankTex.clone();
+    roofTex.rotation = Math.PI / 2;
+    roofTex.repeat.set(slopeLen / 1.4, panelLenX / 1.6);
     roofTex.needsUpdate = true;
-    const roofMat = new THREE.MeshStandardMaterial({ map: roofTex, roughness: 0.95, metalness: 0.0 });
+    const roofMat = new THREE.MeshStandardMaterial({ map: roofTex, color: 0x9c8465, roughness: 0.95, metalness: 0.0 });
 
     // Group origin at the eave centre so child offsets are simple and the body's
     // collision box bottom sits exactly on the wall tops.
@@ -7252,21 +7229,41 @@ function buildWoodenHouse(cx, cz) {
     frontSlope.position.set(0, ridgeRise / 2, -run / 2);
     frontSlope.rotation.x = -angle;
     roofGroup.add(frontSlope);
-    // Ridge cap along the apex
-    const ridge = new THREE.Mesh(new THREE.BoxGeometry(panelLenX, 0.24, 0.56), thatchMat);
+    // Ridge board along the apex
+    const ridge = new THREE.Mesh(new THREE.BoxGeometry(panelLenX, 0.24, 0.56), roofMat);
     ridge.castShadow = true; ridge.position.set(0, ridgeRise + 0.04, 0);
     roofGroup.add(ridge);
 
-    // Plaster gable-end triangles (relative to the eave-centre origin)
+    // Vertical-board gable-end triangles (relative to the eave-centre origin)
+    const gableTex = woodPlankTex.clone();
+    gableTex.rotation = Math.PI / 2;             // boards run vertically
+    gableTex.repeat.set(0.8, 0.55);
+    gableTex.needsUpdate = true;
+    const gableMat = new THREE.MeshStandardMaterial({
+        map: gableTex, color: 0xa08a68, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide,
+    });
     function addGable(zRel) {
         const sh = new THREE.Shape();
         sh.moveTo(-hutW / 2, 0); sh.lineTo(hutW / 2, 0); sh.lineTo(0, ridgeRise); sh.closePath();
-        const gm = new THREE.Mesh(new THREE.ShapeGeometry(sh), plasterMat);
+        const gm = new THREE.Mesh(new THREE.ShapeGeometry(sh), gableMat);
         gm.castShadow = true; gm.position.z = zRel;
         roofGroup.add(gm);
     }
     addGable(zFront - zMid);
     addGable(zBack - zMid);
+
+    // Rusty stovepipe poking through the back slope — part of the roof group,
+    // so it topples with the roof.
+    const pipeMat = new THREE.MeshStandardMaterial({ color: 0x3d3630, roughness: 0.6, metalness: 0.55 });
+    const pipeX = hutW * 0.28, pipeZ = run * 0.30;
+    const pipeBaseY = ridgeRise * (1 - pipeZ / run);   // slope height at pipeZ
+    const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.5, 10), pipeMat);
+    pipe.castShadow = true;
+    pipe.position.set(pipeX, pipeBaseY + 0.45, pipeZ);
+    roofGroup.add(pipe);
+    const pipeCap = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.08, 10), pipeMat);
+    pipeCap.position.set(pipeX, pipeBaseY + 1.28, pipeZ);
+    roofGroup.add(pipeCap);
 
     // Dynamic body: compact ridge core + two slim eave rails. The rails let the
     // roof sit naturally on wall tops and fail progressively as support is lost,
@@ -7300,18 +7297,33 @@ function buildWoodenHouse(cx, cz) {
                   scored: true, isRoof: true, mesh: roofGroup, grp: CGROUP_BRICK, storyRole: 'castle',
                   offY: -ridgeRise * 0.70 });
 
-    // Stone chimney poking through the back slope (static masonry, stays put)
-    const chimX = cx + hutW / 2 - 1.65;
-    const chimZ = zMid + 0.7;
-    const chimTop = ridgeY + 1.0;
-    const chim = new THREE.Mesh(new THREE.BoxGeometry(0.9, chimTop, 0.9), stoneMat);
-    chim.castShadow = true; chim.position.set(chimX, chimTop / 2, chimZ);
-    scene.add(chim);
-    markCastleMesh(chim);
-    const chimCap = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.22, 1.1), stoneMat);
-    chimCap.castShadow = true; chimCap.position.set(chimX, chimTop + 0.05, chimZ);
-    scene.add(chimCap);
-    markCastleMesh(chimCap);
+    // Crooked hand-painted "KEEP OUT" sign nailed above the door.
+    {
+        const sc = document.createElement('canvas'); sc.width = 256; sc.height = 64;
+        const sx2 = sc.getContext('2d');
+        sx2.fillStyle = '#8a6b42'; sx2.fillRect(0, 0, 256, 64);
+        sx2.strokeStyle = 'rgba(60,40,20,0.5)'; sx2.lineWidth = 3;
+        for (const lx of [4, 250]) { sx2.beginPath(); sx2.moveTo(lx, 2); sx2.lineTo(lx, 62); sx2.stroke(); }
+        sx2.fillStyle = '#2b1d10';
+        sx2.font = 'bold 38px Georgia, serif';
+        sx2.textAlign = 'center'; sx2.textBaseline = 'middle';
+        sx2.fillText('KEEP OUT', 128, 34);
+        // nail heads
+        sx2.fillStyle = '#1c1c1c';
+        for (const [nx, ny] of [[14, 12], [242, 14], [16, 52], [240, 50]]) {
+            sx2.beginPath(); sx2.arc(nx, ny, 4, 0, Math.PI * 2); sx2.fill();
+        }
+        const signTex = new THREE.CanvasTexture(sc);
+        const sign = new THREE.Mesh(
+            new THREE.BoxGeometry(2.3, 0.58, 0.06),
+            new THREE.MeshStandardMaterial({ map: signTex, roughness: 0.9 })
+        );
+        sign.castShadow = true;
+        sign.position.set(cx + 0.35, DOOR_H * PS.h + PS.h * 1.15, cz - PT * 0.75);
+        sign.rotation.z = -0.055;   // hung slightly wonky, naturally
+        scene.add(sign);
+        markCastleMesh(sign);
+    }
 }
 buildWoodenHouse(60, 30);
 // NPC guard inside the hut, facing the door (door is the front wall at z=30,
@@ -9930,7 +9942,9 @@ function syncBrickVisualTransform(b) {
     if (!b || !b.body || b.idx < 0) return;
     _iDummy.position.copy(b.body.position);
     _iDummy.quaternion.copy(b.body.quaternion);
+    if (b.isPlank && b.lenScale) _iDummy.scale.set(b.isZ ? 1 : b.lenScale, 1, b.isZ ? b.lenScale : 1);
     _iDummy.updateMatrix();
+    _iDummy.scale.set(1, 1, 1);
     if (b.isPlank) {
         if (b.isZ) plankInstZ.setMatrixAt(b.idx, _iDummy.matrix);
         else       plankInstX.setMatrixAt(b.idx, _iDummy.matrix);
@@ -18126,9 +18140,10 @@ function resolveNpcSolidCollision(np, footY, r = 0.34) {
             hy = BS.d / 2;
             hz = (b.spanAxis === 'z') ? b.halfSpan : BS.d / 2;
         } else if (b.isPlank) {
-            hx = b.isZ ? PS.d / 2 : PS.w / 2;
+            const halfLen = (PS.w / 2) * (b.lenScale || 1);
+            hx = b.isZ ? PT / 2 : halfLen;
             hy = PS.h / 2;
-            hz = b.isZ ? PS.w / 2 : PS.d / 2;
+            hz = b.isZ ? halfLen : PT / 2;
         } else if (b.isWedge) {
             hx = BS.w / 2;
             hy = BS.w / 2;
@@ -19801,8 +19816,9 @@ function animate() {
                         hx = (b.spanAxis === 'x') ? b.halfSpan : BS.d / 2;
                         hz = (b.spanAxis === 'z') ? b.halfSpan : BS.d / 2;
                     } else if (b.isPlank) {
-                        hx = b.isZ ? PS.d / 2 : PS.w / 2;
-                        hz = b.isZ ? PS.w / 2 : PS.d / 2;
+                        const halfLen = (PS.w / 2) * (b.lenScale || 1);
+                        hx = b.isZ ? PT / 2 : halfLen;
+                        hz = b.isZ ? halfLen : PT / 2;
                     } else if (b.isWedge) {
                         hx = BS.w / 2; hz = BS.w / 2;
                     } else {
@@ -20603,7 +20619,9 @@ function animate() {
         if (brickSimulated || b._wasSimulatedPrev) {
             _iDummy.position.copy(b.body.position);
             _iDummy.quaternion.copy(b.body.quaternion);
+            if (b.isPlank && b.lenScale) _iDummy.scale.set(b.isZ ? 1 : b.lenScale, 1, b.isZ ? b.lenScale : 1);
             _iDummy.updateMatrix();
+            _iDummy.scale.set(1, 1, 1);
             if (b.isPlank) {
                 if (b.isZ) plankInstZ.setMatrixAt(b.idx, _iDummy.matrix);
                 else       plankInstX.setMatrixAt(b.idx, _iDummy.matrix);
