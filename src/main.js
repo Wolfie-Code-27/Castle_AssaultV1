@@ -2818,6 +2818,7 @@ const bunkerColliderBodies = [];  // all static bunker physics, for castle suppr
 let king = null;                  // the king NPC entry
 let throneGroup = null;
 let bunkerWp = null;              // bunker flood water plane record
+let bunkerWaterCap = null;        // fancy Three.js Water surface for the flood
 let bunkerFlooding = false, castleMoatDraining = false, castleMoatDrained = false;
 let bunkerCoinsCollected = 0;
 let castleMoatWaterPlane = null, castleMoatWaterCap = null;
@@ -6422,14 +6423,12 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     // the flood is driven by lerping bunkerWp.baseY (level surface is correct
     // over the sloped descent — it pools at the throne end first).
     bunkerWp = addWaterPlane((B.X1 + B.X2) / 2, (B.OPEN_Z1 + B.Z2) / 2, B.X2 - B.X1 - 0.4, B.Z2 - B.OPEN_Z1 - 0.4, 'castle', B.FLOOR_Y - 0.15);
-    // The shared murky moat underlay is near-invisible in the dark chamber —
-    // give the flood its own brighter sheet so the rising threat reads.
-    if (bunkerWp && bunkerWp.underlay) {
-        bunkerWp.underlay.material = new THREE.MeshStandardMaterial({
-            color: 0x2e6b8a, transparent: true, opacity: 0.62,
-            roughness: 0.35, metalness: 0.0, emissive: 0x0a2432, depthWrite: false,
-        });
-    }
+    // The visible surface is the same Three.js Water as the moat, layered on
+    // top of the stock underlay/ripple exactly like it. The flood driver
+    // raises it with bunkerWp.baseY; hidden until the switch is pulled.
+    const bunkerWaterGeo = makeRoundedRectGeometry(B.X1 + 0.2, B.X2 - 0.2, B.OPEN_Z1 + 0.2, B.Z2 - 0.2, 1.5, 8);
+    bunkerWaterCap = addStoryBridgeVisualWaterCap(bunkerWaterGeo, B.FLOOR_Y - 0.15 + 0.05, 0, (B.OPEN_Z1 + B.Z2) / 2, castleSceneMeshes, 'castle', false);
+    if (bunkerWaterCap) bunkerWaterCap.visible = false;
 })();
 
 // === King's Bunker: trapdoor, key pickup, interaction, descent/ascent ===
@@ -6704,6 +6703,7 @@ window.__bunkerTest = {
     trapdoor: () => trapdoor,
     throne: () => throneGroup,
     water: () => bunkerWp,
+    waterCap: () => bunkerWaterCap,
     hasKey: () => hasKey,
     giveKey: () => { hasKey = true; },
     tryInteract,
@@ -6747,7 +6747,12 @@ window.__bunkerTest = {
         const hits = rc.intersectObjects(scene.children, true);
         return {
             dir: rc.ray.direction.toArray().map(v => +v.toFixed(3)),
-            hits: hits.slice(0, 2).map(h => ({ d: +h.distance.toFixed(2), name: h.object.name || h.object.type })),
+            hits: hits.slice(0, 3).map(h => ({
+                d: +h.distance.toFixed(2),
+                name: h.object.name || h.object.type,
+                vis: h.object.visible,
+                col: h.object.material && h.object.material.color ? h.object.material.color.getHexString() : null,
+            })),
         };
     },
     blast: (x, y, z, r = 4) => triggerBlast(new THREE.Vector3(x, y, z), r),
@@ -10009,12 +10014,12 @@ function setStoryCastleSuppressed(suppressed) {
     for (const wm of bridgeLibraryWaterSurfaces) {
         if (!wm) continue;
         if ((wm.userData?.waterRole || 'bridge') !== 'castle') continue;
-        wm.visible = !suppressed && devWaterFxEnabled && !castleMoatDrained;
+        wm.visible = !suppressed && devWaterFxEnabled && !(wm === castleMoatWaterCap && castleMoatDrained);
     }
     for (const cap of storyWaterCapMeshes) {
         if (!cap) continue;
         if ((cap.userData?.waterRole || 'bridge') !== 'castle') continue;
-        cap.visible = !suppressed && devWaterFxEnabled && !castleMoatDrained;
+        cap.visible = !suppressed && devWaterFxEnabled && !(cap === castleMoatWaterCap && castleMoatDrained);
     }
 }
 
@@ -10881,13 +10886,18 @@ function updateBunkerFlood(dt) {
         }
         if (typeof moatReflector !== 'undefined' && moatReflector) moatReflector.visible = false;
     }
-    // The bunker fills.
+    // The bunker fills — stock moat layering: underlay + ripple at the water
+    // level, the Three.js Water surface just above.
     if (bunkerFlooding && bunkerWp && bunkerFloodT < BUNKER_FLOOD_RISE_SEC) {
         bunkerFloodT = Math.min(BUNKER_FLOOD_RISE_SEC, bunkerFloodT + dt);
         const t = bunkerFloodT / BUNKER_FLOOD_RISE_SEC;
         bunkerWp.baseY = THREE.MathUtils.lerp(BUNKER.FLOOR_Y - 0.15, BUNKER_WATER_MAX_Y, t);
         if (bunkerWp.underlay) bunkerWp.underlay.visible = devWaterFxEnabled;
         if (bunkerWp.ripple) bunkerWp.ripple.visible = devWaterFxEnabled;
+    }
+    if (bunkerWaterCap) {
+        bunkerWaterCap.visible = bunkerFlooding && devWaterFxEnabled && !storyCastleSuppressed;
+        if (bunkerWaterCap.visible) bunkerWaterCap.position.y = bunkerWp.baseY + 0.05;
     }
     // Once it is deep enough the fat king floats — on his BACK, furious, while
     // the empty throne bobs beside him (a seated king on a floating throne
