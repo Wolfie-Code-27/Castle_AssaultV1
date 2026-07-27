@@ -2772,6 +2772,8 @@ const BUNKER = {
     FLOOR_Y: -6.4,                          // chamber floor
     CEIL_Y: -1.0,
     TRAPDOOR_X: 0, TRAPDOOR_Z: 78,
+    HATCH_Z2: 77.4,                         // hatch door covers z OPEN_Z1..here; planks cover the rest
+    LADDER_Z: 75.35,                        // ladder flat against the shaft's south wall
     THRONE_X: -11, THRONE_Z: 89.5,
     CEIL_COLLIDER_T: 0.6,
 };
@@ -2798,8 +2800,11 @@ function bunkerEyeYAt(px, pz, camY) {
     if (px < BUNKER.X1 || px > BUNKER.X2 || pz < BUNKER.OPEN_Z1 || pz > BUNKER.Z2) return null;
     const inMouth = px >= BUNKER.OPEN_X1 && px <= BUNKER.OPEN_X2 && pz >= BUNKER.OPEN_Z1 && pz <= BUNKER.OPEN_Z2;
     if (inMouth) {
+        // Only the hatch (south end of the mouth) ever opens; the plank deck
+        // over the rest is permanent floor, like a shut door.
+        const overHatch = pz <= BUNKER.HATCH_Z2;
         const doorShut = trapdoor && trapdoor.state !== 'open' && trapdoor.state !== 'opening';
-        if (doorShut && camY > 1.0) return null;   // the locked door is the floor
+        if (camY > 1.0 && (!overHatch || doorShut)) return null;
         return bunkerFloorYAt(pz) + PLAYER_BASE_Y;
     }
     if (camY > 1.0) return null;   // sealed courtyard level
@@ -3055,14 +3060,22 @@ addGround((BUNKER.X2 + _MIX2) / 2, (BUNKER.OPEN_Z1 + BUNKER.Z2) / 2, _MIX2 - BUN
         wallBox(B.OPEN_X2 + 0.15, (B.OPEN_Z1 + B.TUNNEL_Z2) / 2, 0.3, B.TUNNEL_Z2 - B.OPEN_Z1);
         wallBox((B.X1 + B.OPEN_X1) / 2, B.TUNNEL_Z2 - 0.15, B.OPEN_X1 - B.X1, 0.3);
         wallBox((B.OPEN_X2 + B.X2) / 2, B.TUNNEL_Z2 - 0.15, B.X2 - B.OPEN_X2, 0.3);
-        // Locked trapdoor cover over the mouth (removed from the world when opened)
+        // Locked hatch cover over the south end of the mouth (removed when opened)
         trapdoorBody = new CANNON.Body({
             mass: 0, material: brickPhysMat,
-            shape: new CANNON.Box(new CANNON.Vec3((B.OPEN_X2 - B.OPEN_X1) / 2, 0.15, (B.OPEN_Z2 - B.OPEN_Z1) / 2)),
+            shape: new CANNON.Box(new CANNON.Vec3((B.OPEN_X2 - B.OPEN_X1) / 2, 0.15, (B.HATCH_Z2 - B.OPEN_Z1) / 2)),
         });
-        trapdoorBody.position.set(B.TRAPDOOR_X, 0.14, B.TRAPDOOR_Z);   // top ~y=0.29, flush with the hall floor
+        trapdoorBody.position.set(B.TRAPDOOR_X, 0.14, (B.OPEN_Z1 + B.HATCH_Z2) / 2);   // top ~y=0.29, flush with the hall floor
         world.addBody(trapdoorBody);
         bunkerColliderBodies.push(trapdoorBody);
+        // Permanent plank deck over the rest of the mouth — never removed.
+        const plankBody = new CANNON.Body({
+            mass: 0, material: brickPhysMat,
+            shape: new CANNON.Box(new CANNON.Vec3((B.OPEN_X2 - B.OPEN_X1) / 2, 0.15, (B.OPEN_Z2 - B.HATCH_Z2) / 2)),
+        });
+        plankBody.position.set(B.TRAPDOOR_X, 0.14, (B.HATCH_Z2 + B.OPEN_Z2) / 2);
+        world.addBody(plankBody);
+        bunkerColliderBodies.push(plankBody);
     }
 })();
 
@@ -6369,28 +6382,41 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     scene.add(dais);
     castleSceneMeshes.push(dais);
 
-    // The ladder: VERTICAL, centred in the shaft — the only way in and out
-    // (visual; the E-key climb is the mechanism).
+    // The ladder: VERTICAL, flat against the shaft's south wall directly under
+    // the hatch — the only way in and out (visual; the E-key climb is the
+    // mechanism). Tops out just below the closed door so it never clips it.
     {
         const ladderMat = new THREE.MeshStandardMaterial({ color: 0x5a4022, roughness: 0.85 });
-        const topY = 0.55, botY = B.RAMP1_BOT;   // pokes just above the hall floor
+        const anchorMat = new THREE.MeshStandardMaterial({ color: 0x33271a, roughness: 0.9 });
+        const topY = 0.20, botY = B.RAMP1_BOT;
         const len = topY - botY;
         const geos = [];
         for (const rx of [-0.26, 0.26]) {
-            const g = new THREE.BoxGeometry(0.06, len, 0.06);
+            const g = new THREE.BoxGeometry(0.07, len, 0.07);
             g.translate(rx, botY + len / 2, 0);
             geos.push(g);
         }
         const rungCount = Math.floor(len / 0.36);
         for (let i = 0; i < rungCount; i++) {
-            const g = new THREE.BoxGeometry(0.52, 0.05, 0.06);
+            const g = new THREE.CylinderGeometry(0.025, 0.025, 0.52, 8);
+            g.rotateZ(Math.PI / 2);
             g.translate(0, botY + 0.24 + i * 0.36, 0);
             geos.push(g);
         }
         const ladder = new THREE.Mesh(mergeGeometries(geos), ladderMat);
-        ladder.position.set(B.TRAPDOOR_X, 0, B.TRAPDOOR_Z);
+        ladder.position.set(B.TRAPDOOR_X, 0, B.LADDER_Z);
         scene.add(ladder);
         castleSceneMeshes.push(ladder);
+        // Anchor brackets tying the rails back to the stone wall.
+        const standoff = B.LADDER_Z - B.OPEN_Z1;
+        for (const ay of [topY - 0.35, botY + len * 0.5, botY + 0.45]) {
+            for (const ax of [-0.26, 0.26]) {
+                const anchor = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, standoff), anchorMat);
+                anchor.position.set(ax, ay, B.OPEN_Z1 + standoff / 2);
+                scene.add(anchor);
+                castleSceneMeshes.push(anchor);
+            }
+        }
     }
 
     // Wall torches: emissive-look flame cones + a fixed pool of point lights.
@@ -6434,7 +6460,12 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     // top of the underlay — with reduced alpha so the readable blue shows
     // through and the reflection adds shimmer rather than hiding it.
     const bunkerWaterGeo = makeRoundedRectGeometry(B.X1 + 0.2, B.X2 - 0.2, B.OPEN_Z1 + 0.2, B.Z2 - 0.2, 1.5, 8);
-    bunkerWaterCap = addStoryBridgeVisualWaterCap(bunkerWaterGeo, B.FLOOR_Y - 0.15 + 0.05, 0, (B.OPEN_Z1 + B.Z2) / 2, castleSceneMeshes, 'castle', false);
+    // Points are authored in world XZ (like the moat ring): mirror local Y so
+    // the -PI/2 X-rotation lands the shape at positive Z, and keep the mesh at
+    // the origin — offsetting by the chamber centre on top of absolute coords
+    // is what teleported the surface ~85 units away under the island.
+    bunkerWaterGeo.scale(1, -1, 1);
+    bunkerWaterCap = addStoryBridgeVisualWaterCap(bunkerWaterGeo, B.FLOOR_Y - 0.15 + 0.05, 0, 0, castleSceneMeshes, 'castle', false);
     if (bunkerWaterCap) {
         bunkerWaterCap.visible = false;
         const uni = bunkerWaterCap.material?.uniforms;
@@ -6448,28 +6479,50 @@ const mobileInteractBtn = document.getElementById('mobileInteractBtn');
 
 (function buildTrapdoor() {
     const B = BUNKER;
+    const doorTex = woodPlankTex.clone();
+    doorTex.needsUpdate = true;
+    doorTex.repeat.set(1.4, 1.4);
+    const doorMat = new THREE.MeshStandardMaterial({ map: doorTex, roughness: 0.85, metalness: 0.0, color: 0x7a5c38 });
+    const bandMat = new THREE.MeshStandardMaterial({ color: 0x2e2a26, roughness: 0.55, metalness: 0.65 });
+
+    // Fixed plank deck over the north part of the mouth (matches plankBody).
+    const deckMat = new THREE.MeshStandardMaterial({ map: woodPlankTex, roughness: 0.9, metalness: 0.0, color: 0x6b4e2e });
+    const deckW = (B.OPEN_X2 - B.OPEN_X1) - 0.04, deckL = B.OPEN_Z2 - B.HATCH_Z2;
+    const plankCount = Math.max(4, Math.round(deckL / 0.48));
+    const plankD = deckL / plankCount - 0.03;
+    for (let i = 0; i < plankCount; i++) {
+        const plank = new THREE.Mesh(new THREE.BoxGeometry(deckW, 0.08, plankD), deckMat);
+        plank.position.set(B.TRAPDOOR_X, 0.26, B.HATCH_Z2 + (i + 0.5) * (deckL / plankCount));
+        plank.receiveShadow = true;
+        scene.add(plank);
+        castleSceneMeshes.push(plank);
+    }
+
+    // The hatch door: hinged along the deck edge (north), flops open flat
+    // onto the planks like a real cellar hatch.
     const pivot = new THREE.Group();
-    pivot.position.set(B.OPEN_X1, 0.30, B.TRAPDOOR_Z);   // hinge, west edge at hall level
+    pivot.position.set(B.TRAPDOOR_X, 0.30, B.HATCH_Z2);
     scene.add(pivot);
     castleSceneMeshes.push(pivot);
 
-    const doorTex = woodPlankTex.clone();
-    doorTex.needsUpdate = true;
-    doorTex.repeat.set(1.4, 3.5);
-    const doorMat = new THREE.MeshStandardMaterial({ map: doorTex, roughness: 0.85, metalness: 0.0, color: 0x7a5c38 });
-    const bandMat = new THREE.MeshStandardMaterial({ color: 0x2e2a26, roughness: 0.55, metalness: 0.65 });
-    const doorW = (B.OPEN_X2 - B.OPEN_X1) - 0.06, doorL = (B.OPEN_Z2 - B.OPEN_Z1) - 0.06;
+    const doorW = (B.OPEN_X2 - B.OPEN_X1) - 0.06, doorL = (B.HATCH_Z2 - B.OPEN_Z1) - 0.06;
     const door = new THREE.Mesh(new THREE.BoxGeometry(doorW, 0.07, doorL), doorMat);
-    door.position.set(doorW / 2 + 0.03, 0, 0);
+    door.position.set(0, 0, -doorL / 2 - 0.03);
     door.castShadow = true;
     pivot.add(door);
-    for (const off of [-1.6, 0, 1.6]) {
+    for (const off of [-0.45, -doorL / 2 - 0.03, -doorL + 0.45]) {
         const band = new THREE.Mesh(new THREE.BoxGeometry(doorW - 0.1, 0.085, 0.12), bandMat);
-        band.position.set(doorW / 2 + 0.03, 0.005, off);
+        band.position.set(0, 0.005, off);
         pivot.add(band);
     }
+    // Strap hinges reaching from the deck edge onto the door.
+    for (const hx of [-0.9, 0.9]) {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.09, 0.55), bandMat);
+        strap.position.set(hx, 0.005, -0.30);
+        pivot.add(strap);
+    }
     const ring = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.025, 6, 12), bandMat);
-    ring.position.set(doorW - 0.12, 0.06, 0);
+    ring.position.set(0, 0.06, -doorL + 0.16);
     ring.rotation.x = -Math.PI / 2;
     pivot.add(ring);
 
@@ -6478,9 +6531,11 @@ const mobileInteractBtn = document.getElementById('mobileInteractBtn');
 
 function updateTrapdoor(dt) {
     if (!trapdoor || trapdoor.state !== 'opening') return;
-    trapdoor.angle = Math.min(1.85, trapdoor.angle + dt * 2.4);
-    trapdoor.pivot.rotation.z = trapdoor.angle;
-    if (trapdoor.angle >= 1.84) {
+    // 0 -> ~PI: the door swings up and over the north hinge, coming to rest
+    // nearly flat on the plank deck. Eased so it starts slow and lands heavy.
+    trapdoor.angle = Math.min(2.95, trapdoor.angle + dt * (0.8 + trapdoor.angle * 1.4));
+    trapdoor.pivot.rotation.x = trapdoor.angle;
+    if (trapdoor.angle >= 2.94) {
         trapdoor.state = 'open';
         if (trapdoorBody) {
             if (trapdoorBody.world) world.removeBody(trapdoorBody);
@@ -6580,6 +6635,7 @@ function updateBunkerPickups(dt) {
             playCoinSound();
             spawnScorePopup(p.mesh.position.x, p.mesh.position.y + 0.4, p.mesh.position.z, '+' + BUNKER_COIN_SCORE, null);
             updateCoinHud();
+            kingCoinTaunt();
         }
     }
 }
@@ -6592,17 +6648,17 @@ function getInteractContext() {
     if (!trapdoor) return null;
     if (bunkerState.phase === 'above') {
         if (camera.position.y < 1.2) return null;   // below courtyard — no prompt through the floor
-        // Distance to the mouth RIM (not the centre): the hatch is used from
-        // its edge — you can't stand over the open hole to use it.
+        // Distance to the HATCH rim (not the whole mouth): the door is used
+        // from its edge — you can't stand over the open hole to use it.
         const mx = THREE.MathUtils.clamp(camera.position.x, BUNKER.OPEN_X1, BUNKER.OPEN_X2);
-        const mz = THREE.MathUtils.clamp(camera.position.z, BUNKER.OPEN_Z1, BUNKER.OPEN_Z2);
+        const mz = THREE.MathUtils.clamp(camera.position.z, BUNKER.OPEN_Z1, BUNKER.HATCH_Z2);
         if (Math.hypot(camera.position.x - mx, camera.position.z - mz) >= 1.2) return null;
         if (trapdoor.state === 'open' || trapdoor.state === 'opening') return { id: 'hatch-descend', text: 'Climb down the ladder' };
         if (hasKey) return { id: 'trapdoor-unlock', text: 'Unlock the trapdoor' };
         return { id: 'trapdoor-locked', text: 'Locked — find the key' };
     }
     // inside: climbing out happens at the ladder base in the shaft
-    const dLadder = Math.hypot(camera.position.x - BUNKER.TRAPDOOR_X, camera.position.z - BUNKER.TRAPDOOR_Z);
+    const dLadder = Math.hypot(camera.position.x - BUNKER.TRAPDOOR_X, camera.position.z - BUNKER.LADDER_Z);
     if (dLadder < 1.7 && !playerWaterState && trapdoor.state === 'open') return { id: 'hatch-ascend', text: 'Climb up the ladder' };
     return null;
 }
@@ -6660,9 +6716,9 @@ function flashInteractPrompt() {
 function beginBunkerTransition(dir) {
     const B = BUNKER;
     bunkerState.from.copy(camera.position);
-    bunkerState.via.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.TRAPDOOR_Z);
+    bunkerState.via.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.LADDER_Z + 0.55);
     if (dir === 'down') {
-        bunkerState.to.set(B.TRAPDOOR_X, B.RAMP1_BOT + PLAYER_BASE_Y, B.TRAPDOOR_Z);
+        bunkerState.to.set(B.TRAPDOOR_X, B.RAMP1_BOT + PLAYER_BASE_Y, B.LADDER_Z + 0.65);
     } else {
         bunkerState.to.set(B.TRAPDOOR_X, PLAYER_BASE_Y, B.OPEN_Z1 - 1.0);
     }
@@ -6723,6 +6779,13 @@ window.__bunkerTest = {
     everEntered: () => bunkerEverEntered,
     flooding: () => ({ bunkerFlooding, castleMoatDrained, moatY: castleMoatWaterPlane ? castleMoatWaterPlane.baseY : null, bunkerY: bunkerWp ? bunkerWp.baseY : null }),
     switchTimer: () => kingSwitchTimer,
+    floatState: () => ({
+        kingFloating, kingSwitchPullT, bunkerFloodT,
+        kingY: king ? +king.group.position.y.toFixed(2) : null,
+        kingRotX: king ? +king.group.rotation.x.toFixed(2) : null,
+        throneY: throneGroup ? +throneGroup.position.y.toFixed(2) : null,
+        ragdoll: king ? !!king.isRagdoll : null,
+    }),
     teleportAbove: () => {
         camera.position.set(BUNKER.TRAPDOOR_X, PLAYER_BASE_Y, BUNKER.OPEN_Z1 - 1.5);
         bunkerState.phase = 'above';
@@ -10710,6 +10773,57 @@ TOWER_CENTERS.forEach(({ cx, cz }) => {
 // bonus), and he is excluded from the drawbridge-aggro march.
 let kingPunchT = 0, kingPunchCooldown = 0, kingPunchKind = 'R';
 const KING_PUNCH_DUR = 0.45;
+
+// The king's running commentary: dry contempt that curdles into fury as the
+// coin count climbs. Tiers are keyed to coins pocketed (1-3 / 4-6 / 7-9).
+const KING_COIN_TAUNTS = [
+    [
+        'Oh, do help yourself.',
+        'That one\'s cursed, actually.',
+        'Yes, lovely, put it back.',
+        'A burglar. How exotic.',
+    ],
+    [
+        'Right. That was the holiday fund.',
+        'I counted those, you know. Twice.',
+        'You\'re actually pocketing my bling.',
+        'Starting to find this quite rude.',
+    ],
+    [
+        'PUT. THEM. BACK.',
+        'Expect a strongly worded letter.',
+        'Guards! ...Oh, marvellous. Nobody.',
+        'I am WELL annoyed now.',
+    ],
+];
+const KING_LAST_COIN_TAUNT = 'Took the lot. I hope you\'re proud.';
+const KING_AMBIENT_TAUNTS = [
+    'You do know this is burglary, yes?',
+    'The décor is not for sale either.',
+    'I\'d offer tea, but you\'re a criminal.',
+    'Mind the throne. It\'s antique.',
+];
+const KING_FLOAT_TAUNTS = [
+    'Bit damp down there, is it?',
+    'Do mind the water. It\'s rising, you see.',
+    'Heavy, are they? The coins?',
+];
+const KING_SWITCH_TAUNT = 'Let\'s see you swim with full pockets.';
+let kingTauntAtMs = 0;
+let kingAmbientTauntIn = 7;
+function kingSay(text, minGapMs = 2500) {
+    if (!king || king.isRagdoll || storyCastleSuppressed) return;
+    const now = performance.now();
+    if (now - kingTauntAtMs < minGapMs) return;
+    kingTauntAtMs = now;
+    spawnNpcTaunt(king, text);
+}
+function kingCoinTaunt() {
+    if (bunkerCoinsCollected >= BUNKER_COIN_TOTAL) { kingSay(KING_LAST_COIN_TAUNT, 0); return; }
+    const tier = bunkerCoinsCollected <= 3 ? 0 : (bunkerCoinsCollected <= 6 ? 1 : 2);
+    const pool = KING_COIN_TAUNTS[tier];
+    kingSay(pool[(Math.random() * pool.length) | 0]);
+}
 (function buildKingNPC() {
     king = buildNPC(BUNKER.THRONE_X, BUNKER.THRONE_Z, BUNKER.FLOOR_Y + 0.5, Math.PI, 'none');
     king.storyRole = 'castleKing';
@@ -10821,9 +10935,16 @@ function updateKingsBunker(dt) {
 
 // Per-frame seated pose. MUST early-return on ragdoll: pinning limbs/position
 // after activateRagdoll hides the group is what froze the old version.
+const _kingHeadScratch = new THREE.Vector3();
 function updateKingPose(dt) {
     if (!king || king.isRagdoll || !throneGroup) return;
     const tNow = performance.now() * 0.001;
+
+    // Scripted mood for the shared face rig: smug on his throne, furious while
+    // the player is inside robbing him, laughing the moment his flood wins.
+    const moodTarget = bunkerFlooding ? 0.03 : (bunkerState.phase !== 'above' ? 1.0 : 0.15);
+    king.angerLevel = THREE.MathUtils.lerp(king.angerLevel ?? 0.15, moodTarget, Math.min(1, dt * 2.0));
+
     if (kingFloating && bunkerWp) {
         // Belly-up float: horizontal on the surface, limbs out, crown slipping.
         const bob = Math.sin(tNow * 2.1) * 0.045 + Math.sin(tNow * 3.7 + 1.3) * 0.02;
@@ -10835,6 +10956,18 @@ function updateKingPose(dt) {
         king.group.rotation.z = Math.sin(tNow * 1.4) * 0.08;
         king.anim.armL.rotation.z += (1.25 - king.anim.armL.rotation.z) * Math.min(1, dt * 4);
         king.anim.armR.rotation.z += (-1.25 - king.anim.armR.rotation.z) * Math.min(1, dt * 4);
+        // Gloating: chin up watching the player, fists pumping in triumph —
+        // with the occasional smug remark while you struggle below.
+        kingAmbientTauntIn -= dt;
+        if (kingAmbientTauntIn <= 0) {
+            kingAmbientTauntIn = 11 + Math.random() * 7;
+            kingSay(KING_FLOAT_TAUNTS[(Math.random() * KING_FLOAT_TAUNTS.length) | 0], 4000);
+        }
+        king.anim.headMesh.rotation.x += (-0.75 - king.anim.headMesh.rotation.x) * Math.min(1, dt * 3);
+        king.anim.headMesh.rotation.y += (0 - king.anim.headMesh.rotation.y) * Math.min(1, dt * 3);
+        const pump = Math.sin(tNow * 6.5);
+        king.anim.armL.rotation.x = -0.5 + pump * 0.35;
+        king.anim.armR.rotation.x = -0.5 - pump * 0.35;
         // indignant little kicks
         king.anim.legL.rotation.x = -0.15 + Math.sin(tNow * 5.2) * 0.22;
         king.anim.legR.rotation.x = -0.15 + Math.sin(tNow * 5.2 + Math.PI) * 0.22;
@@ -10843,14 +10976,55 @@ function updateKingPose(dt) {
     // Ride the throne (it floats during the flood).
     king.group.position.set(throneGroup.position.x, throneGroup.position.y, throneGroup.position.z);
     king.group.rotation.y = Math.PI / 2;   // face the tunnel mouth (east, +x)
+
+    // Head tracking: the lever mid-pull, otherwise the player once inside.
+    {
+        const head = king.anim.headMesh;
+        let tx = null, ty = 0, tz = 0;
+        if (kingSwitchPullT > 0) {
+            tx = throneGroup.position.x + 0.10; ty = throneGroup.position.y + 0.55; tz = throneGroup.position.z + 0.85;
+        } else if (bunkerState.phase !== 'above') {
+            tx = camera.position.x; ty = camera.position.y; tz = camera.position.z;
+        }
+        let yawT = 0, pitchT = 0;
+        if (tx != null) {
+            const hw = head.getWorldPosition(_kingHeadScratch);
+            const dx = tx - hw.x, dy = ty - hw.y, dz = tz - hw.z;
+            let yaw = Math.atan2(dx, dz) - king.group.rotation.y;
+            yaw = Math.atan2(Math.sin(yaw), Math.cos(yaw));
+            yawT = THREE.MathUtils.clamp(yaw, -1.15, 1.15);
+            pitchT = -THREE.MathUtils.clamp(Math.atan2(dy, Math.hypot(dx, dz)), -0.55, 0.65);
+        }
+        const hk = Math.min(1, dt * 5);
+        head.rotation.y += (yawT - head.rotation.y) * hk;
+        head.rotation.x += (pitchT - head.rotation.x) * hk;
+    }
+
+    // Ambient grumbling while the thief is in the room (pre-flood).
+    if (bunkerState.phase !== 'above' && !bunkerFlooding) {
+        kingAmbientTauntIn -= dt;
+        if (kingAmbientTauntIn <= 0) {
+            kingAmbientTauntIn = 9 + Math.random() * 6;
+            kingSay(KING_AMBIENT_TAUNTS[(Math.random() * KING_AMBIENT_TAUNTS.length) | 0], 4000);
+        }
+    }
+
     // Seated: thighs forward, feet comically dangling; gentle breathing.
     king.anim.legL.rotation.x = -0.9;
     king.anim.legR.rotation.x = -0.9;
     const torsoMesh = king.parts[0].mesh;
     torsoMesh.scale.y = 1.12 + Math.sin(tNow * 1.8) * 0.012;
+
+    const restK = Math.min(1, dt * 8);
+    const dxp = camera.position.x - king.group.position.x;
+    const dzp = camera.position.z - king.group.position.z;
+    const distP = Math.hypot(dxp, dzp);
+
     if (kingPunchT > 0) {
         const p = 1 - kingPunchT / KING_PUNCH_DUR;
         const wave = Math.sin(p * Math.PI);
+        // Whole body commits: torso pivots into the blow.
+        king.group.rotation.y = Math.PI / 2 + wave * (kingPunchKind === 'L' ? 0.22 : -0.22);
         if (kingPunchKind === 'KICK') {
             king.anim.legR.rotation.x = -0.9 - wave * 1.1;
         } else if (kingPunchKind === 'L') {
@@ -10858,9 +11032,24 @@ function updateKingPose(dt) {
         } else {
             king.anim.armR.rotation.x = -0.55 - wave * 1.9;
         }
+    } else if (kingSwitchPullT > 0) {
+        // Reach left to the lever beside the throne and haul it over.
+        const pull = 1 - Math.max(0, kingSwitchPullT / 0.9);
+        king.anim.armL.rotation.z += (1.10 - king.anim.armL.rotation.z) * Math.min(1, dt * 9);
+        king.anim.armL.rotation.x += ((-0.25 - pull * 0.75) - king.anim.armL.rotation.x) * Math.min(1, dt * 9);
+        king.anim.armR.rotation.x += (-0.55 - king.anim.armR.rotation.x) * restK;
+    } else if (bunkerState.phase !== 'above' && !bunkerFlooding && distP >= KING_PUNCH_RANGE) {
+        // Out of reach: shake a raised fist at the thief.
+        const shake = Math.sin(tNow * 13) * 0.16;
+        king.anim.armR.rotation.x += ((-2.05 + shake) - king.anim.armR.rotation.x) * Math.min(1, dt * 7);
+        king.anim.armR.rotation.z += (-0.30 - king.anim.armR.rotation.z) * Math.min(1, dt * 7);
+        king.anim.armL.rotation.x += (-0.55 - king.anim.armL.rotation.x) * restK;
+        king.anim.armL.rotation.z += (0 - king.anim.armL.rotation.z) * restK;
     } else {
-        king.anim.armL.rotation.x += (-0.55 - king.anim.armL.rotation.x) * Math.min(1, dt * 10);
-        king.anim.armR.rotation.x += (-0.55 - king.anim.armR.rotation.x) * Math.min(1, dt * 10);
+        king.anim.armL.rotation.x += (-0.55 - king.anim.armL.rotation.x) * restK;
+        king.anim.armR.rotation.x += (-0.55 - king.anim.armR.rotation.x) * restK;
+        king.anim.armL.rotation.z += (0 - king.anim.armL.rotation.z) * restK;
+        king.anim.armR.rotation.z += (0 - king.anim.armR.rotation.z) * restK;
     }
 }
 
@@ -10877,6 +11066,7 @@ function updateBunkerFlood(dt) {
             bunkerFlooding = true;
             castleMoatDrained = true;   // gameplay flags flip at drain START
             kingSwitchPullT = 0.9;
+            kingSay(KING_SWITCH_TAUNT, 0);
             if (storyModeEnabled) setStoryHud('The King pulled the switch — the bunker is flooding!');
         }
     }
@@ -17637,7 +17827,19 @@ const TOWER_GUARD_TAUNTS = [
     'Top tier siege work. Truly.',
     'I\'ve seen better aim from a falling trebuchet.',
     'You had one job.',
-    'At this rate we\'ll all retire naturally.'
+    'At this rate we\'ll all retire naturally.',
+    'Oi, peasant! Yeah, you.',
+    'You\'re getting mashed up, no cap.',
+    'Mate. MATE. Look at the state of you.',
+    'Absolute melt, this one.',
+    'You\'re about to catch these gauntlets.',
+    'Proper liberty you\'re taking, brah.',
+    'Bro thinks he\'s a siege engine.',
+    'Certified peasant behaviour, that.',
+    'You\'re done, fam. Dusted. Finished.',
+    'It\'s giving... peasant.',
+    'On the wall\'s life, you\'re getting folded.',
+    'Touch grass, peasant. Oh wait—',
 ];
 const DRONE_FEAR_TAUNTS = [
     'THAT IS NOT A BIRD—',
@@ -17660,6 +17862,9 @@ const DRONE_FEAR_TAUNTS = [
     'RIGHT THAT\'S IT I\'M MOVING COUNTRY—',
     'Oh for the love of — RUN—',
     'GET IT AWAY FROM ME—',
+    'NAH. NAH NAH NAH. I\'M OUT—',
+    'IT\'S LOCKED ON, FAM—',
+    'THAT THING\'S MOVING MAD—',
 ];
 const DRONE_FEAR_RADIUS  = 28;   // m - NPCs spot the drone
 const DRONE_CRAWL_RADIUS =  8;   // m - NPCs dive for cover
@@ -17738,7 +17943,12 @@ const NPC_PANIC_SWIM_MAX_SEC = isMobileProfile ? 2.8 : 4.8;
 const NPC_PANIC_SWIM_DRIFT_SPEED = isMobileProfile ? 0.42 : 0.56;
 const NPC_PANIC_SWIM_BOB_AMP = isMobileProfile ? 0.10 : 0.20;
 const NPC_PANIC_SWIM_SURFACE_OFFSET = 0.36;
-const NPC_PANIC_SWIM_TAUNTS = ['Help!', 'Glub!', 'Nooo!', 'Save me!', 'Blurgh!'];
+const NPC_PANIC_SWIM_TAUNTS = [
+    'Help!', 'Glub!', 'Nooo!', 'Save me!', 'Blurgh!',
+    'Can\'t swim in chainmail, FYI—',
+    'This is bare cold—',
+    'Who put water here—',
+];
 function spawnNpcTaunt(npc, text) {
     const p = npc.group.position;
     spawnScorePopup(p.x, p.y + 2.1, p.z, text, 'speech');
@@ -19040,7 +19250,9 @@ function animate() {
         _npcAggroTriggered = true;
         let waveIndex = 0;
         for (const npc of npcList) {
-            if (npc.isRagdoll || npc.isTowerGuard || npc.storyDormant || npc.storyBridgeWalker) continue;
+            // isBunkerKing: the king never leaves his throne — marching him would
+            // ground-snap him to the courtyard ABOVE his own bunker.
+            if (npc.isRagdoll || npc.isTowerGuard || npc.storyDormant || npc.storyBridgeWalker || npc.isBunkerKing) continue;
             npc.walking   = true;
             npc.clearedBridge = false;
             npc.bridgeTurnLock = false;
@@ -19359,7 +19571,9 @@ function animate() {
     updateDronePanic(dt);
 
     for (const npc of npcList) {
-        if (npc.isRagdoll || !npc.walking || npc.isTowerGuard || npc.storyDormant || npc.storyBridgeWalker) continue;
+        // isBunkerKing is defensive: any stray walking=true (drone fear, aggro)
+        // must never route the throne-bound king through walker locomotion.
+        if (npc.isRagdoll || !npc.walking || npc.isTowerGuard || npc.storyDormant || npc.storyBridgeWalker || npc.isBunkerKing) continue;
         const panicPos = npc.group.position;
         if (!npc.npcPanicSwim) {
             const waterY = getWaterSurfaceYAtXZ(panicPos.x, panicPos.z, false);
@@ -20483,8 +20697,11 @@ function animate() {
         for (const npc of npcList) {
             if (npc.isRagdoll || !npc.group || !npc.anim) continue;
             // Per-NPC anger: local proximity spike, decays slowly but floor is world anger.
-            npc.angerLevel = Math.max(_npcWorldAnger,
-                                      (npc.angerLevel || 0) - dt * 0.06);
+            // The king's mood is scripted (smug -> furious -> laughing) in
+            // updateKingPose, so he skips the world floor entirely.
+            npc.angerLevel = npc.isBunkerKing
+                ? (npc.angerLevel || 0)
+                : Math.max(_npcWorldAnger, (npc.angerLevel || 0) - dt * 0.06);
             const anger = npc.angerLevel;
             const { browL, browR, mouthGroup, lipArc, mouthOpen, teeth,
                     eyeL, eyeR, headMesh } = npc.anim;
