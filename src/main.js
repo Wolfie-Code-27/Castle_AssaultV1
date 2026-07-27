@@ -1767,7 +1767,7 @@ function fireCannonballP2(power) {
                 setTimeout(() => removeCannonballByBody(body), 30);
             });
 
-            const shotEntry = { mesh, body, weaponType: currentWeapon, isP2: true };
+            const shotEntry = { mesh, body, weaponType: currentWeapon, isP2: true, ox: start.x, oy: start.y, oz: start.z };
             cannonballs.push(shotEntry);
             scheduleCannonballExpiry(shotEntry, 900);
         }
@@ -15230,7 +15230,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
                 setTimeout(() => removeCannonballByBody(body), 30);
             });
 
-            const shotEntry = { mesh, body, weaponType: currentWeapon };
+            const shotEntry = { mesh, body, weaponType: currentWeapon, ox: start.x, oy: start.y, oz: start.z };
             if (!firstPelletEntry) firstPelletEntry = shotEntry;
             cannonballs.push(shotEntry);
             scheduleCannonballExpiry(shotEntry, 900);
@@ -19189,6 +19189,24 @@ function animate() {
                     markNpcAngry(np.x, np.z, 0.55, 18);
                     break; // shoved, no kill
                 }
+                // Buckshot falls off HARD with range: full carnage inside ~8 m,
+                // fading to nothing by ~18 m — past that a pellet only staggers.
+                let shotgunFalloff = 1;
+                if (cb.weaponType === WEAPON_IDX_SHOTGUN) {
+                    const sdx = np.x - (cb.ox ?? np.x);
+                    const sdy = ny - (cb.oy ?? ny);
+                    const sdz = np.z - (cb.oz ?? np.z);
+                    const shotDist = Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+                    shotgunFalloff = THREE.MathUtils.clamp(1 - (shotDist - 8) / 10, 0, 1);
+                    if (shotgunFalloff <= 0) {
+                        const bv = cb.body.velocity;
+                        const horiz = Math.sqrt(bv.x * bv.x + bv.z * bv.z) || 1;
+                        np.x += (bv.x / horiz) * 0.4;
+                        np.z += (bv.z / horiz) * 0.4;
+                        markNpcAngry(np.x, np.z, 0.55, 18);
+                        break; // out of buckshot's reach — staggered, not killed
+                    }
+                }
                 perfRecordEvent('npc_hit', `${cb.weaponType}/${npc.isTowerGuard ? 'tower' : 'ground'}/${isMobileProfile ? 'mobile' : 'desktop'}`);
                 // Red blood spray at the impact point (people, not stone).
                 spawnBlood(new THREE.Vector3(cb.body.position.x, cb.body.position.y, cb.body.position.z));
@@ -19205,6 +19223,27 @@ function animate() {
                     if (npc.partBodies && npc.partBodies[0]) {
                         npc.partBodies[0].applyImpulse(
                             new CANNON.Vec3((sp.x / ss) * 120, 20, (sp.z / ss) * 120),
+                            npc.partBodies[0].position
+                        );
+                    }
+                }
+                if (cb.weaponType === WEAPON_IDX_SHOTGUN && cb.body && npc.partBodies) {
+                    // Point-blank buckshot: comically excessive fling — double the
+                    // sniper's shove on the torso plus a kick to every limb so the
+                    // whole ragdoll cartwheels. Scaled by the range falloff.
+                    const sp = cb.body.velocity;
+                    const ss = Math.sqrt(sp.x * sp.x + sp.y * sp.y + sp.z * sp.z) || 1;
+                    const f = 240 * shotgunFalloff;
+                    for (const pb of npc.partBodies) {
+                        if (!pb) continue;
+                        pb.applyImpulse(
+                            new CANNON.Vec3((sp.x / ss) * f * 0.35, 14 * shotgunFalloff, (sp.z / ss) * f * 0.35),
+                            pb.position
+                        );
+                    }
+                    if (npc.partBodies[0]) {
+                        npc.partBodies[0].applyImpulse(
+                            new CANNON.Vec3((sp.x / ss) * f, 44 * shotgunFalloff, (sp.z / ss) * f),
                             npc.partBodies[0].position
                         );
                     }
