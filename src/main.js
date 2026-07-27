@@ -6423,12 +6423,23 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     // the flood is driven by lerping bunkerWp.baseY (level surface is correct
     // over the sloped descent — it pools at the throne end first).
     bunkerWp = addWaterPlane((B.X1 + B.X2) / 2, (B.OPEN_Z1 + B.Z2) / 2, B.X2 - B.X1 - 0.4, B.Z2 - B.OPEN_Z1 - 0.4, 'castle', B.FLOOR_Y - 0.15);
+    // The stock underlay is dark-on-dark in the torch-lit chamber — swap in a
+    // flat UNLIT water blue that always reads, even in pitch dark.
+    if (bunkerWp && bunkerWp.underlay) {
+        bunkerWp.underlay.material = new THREE.MeshBasicMaterial({
+            color: 0x2a7fb8, transparent: true, opacity: 0.6, depthWrite: false,
+        });
+    }
     // The visible surface is the same Three.js Water as the moat, layered on
-    // top of the stock underlay/ripple exactly like it. The flood driver
-    // raises it with bunkerWp.baseY; hidden until the switch is pulled.
+    // top of the underlay — with reduced alpha so the readable blue shows
+    // through and the reflection adds shimmer rather than hiding it.
     const bunkerWaterGeo = makeRoundedRectGeometry(B.X1 + 0.2, B.X2 - 0.2, B.OPEN_Z1 + 0.2, B.Z2 - 0.2, 1.5, 8);
     bunkerWaterCap = addStoryBridgeVisualWaterCap(bunkerWaterGeo, B.FLOOR_Y - 0.15 + 0.05, 0, (B.OPEN_Z1 + B.Z2) / 2, castleSceneMeshes, 'castle', false);
-    if (bunkerWaterCap) bunkerWaterCap.visible = false;
+    if (bunkerWaterCap) {
+        bunkerWaterCap.visible = false;
+        const uni = bunkerWaterCap.material?.uniforms;
+        if (uni && uni.alpha) uni.alpha.value = 0.45;
+    }
 })();
 
 // === King's Bunker: trapdoor, key pickup, interaction, descent/ascent ===
