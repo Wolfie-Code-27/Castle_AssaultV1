@@ -2809,8 +2809,9 @@ function bunkerEyeYAt(px, pz, camY) {
 }
 
 // Bunker runtime state. phase 'above' = outside; 'inside' = anywhere below
-// courtyard level in the descent (derived from camera position each frame).
-const bunkerState = { phase: 'above' };
+// courtyard level (derived from camera position); descending/ascending =
+// scripted ladder climb (input suspended).
+const bunkerState = { phase: 'above', seg: 0, t: 0, from: new THREE.Vector3(), via: new THREE.Vector3(), to: new THREE.Vector3() };
 let bunkerEverEntered = false;
 let hasKey = false;
 let trapdoor = null;              // { pivot, state: 'locked'|'opening'|'open', angle }
@@ -3027,7 +3028,7 @@ addGround((BUNKER.X2 + _MIX2) / 2, (BUNKER.OPEN_Z1 + BUNKER.Z2) / 2, _MIX2 - BUN
                 shape: new CANNON.Box(new CANNON.Vec3(w / 2, 0.3, len / 2)),
             });
             body.position.set((x1 + x2) / 2, (yAtZ1 + yAtZ2) / 2 - 0.3, (z1 + z2) / 2);
-            body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.atan2(rise, run));
+            body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.atan2(rise, run));
             world.addBody(body);
             bunkerColliderBodies.push(body);
         };
@@ -6277,12 +6278,13 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     place(lumpPanel(chLen, chamberH), B.X2, chamberCY, chCZ, -Math.PI / 2);         // east
     place(lumpPanel(B.X2 - B.X1, chamberH), (B.X1 + B.X2) / 2, chamberCY, B.Z2, Math.PI); // far (north)
     // tunnel lining (both ramps) + chamber south face beside the tunnel — all
-    // full chamber depth (see the collider note; swH would leave a gap strip).
+    // full chamber depth. The south face uses rotY 0: its +z normal faces the
+    // chamber (single-sided planes are invisible from behind!).
     const tunLen = B.TUNNEL_Z2 - B.OPEN_Z1, tunCZ = (B.OPEN_Z1 + B.TUNNEL_Z2) / 2;
     place(lumpPanel(tunLen, chamberH), B.OPEN_X1, chamberCY, tunCZ, Math.PI / 2);
     place(lumpPanel(tunLen, chamberH), B.OPEN_X2, chamberCY, tunCZ, -Math.PI / 2);
-    place(lumpPanel(B.OPEN_X1 - B.X1, chamberH), (B.X1 + B.OPEN_X1) / 2, chamberCY, B.TUNNEL_Z2, Math.PI);
-    place(lumpPanel(B.X2 - B.OPEN_X2, chamberH), (B.OPEN_X2 + B.X2) / 2, chamberCY, B.TUNNEL_Z2, Math.PI);
+    place(lumpPanel(B.OPEN_X1 - B.X1, chamberH), (B.X1 + B.OPEN_X1) / 2, chamberCY, B.TUNNEL_Z2, 0);
+    place(lumpPanel(B.X2 - B.OPEN_X2, chamberH), (B.OPEN_X2 + B.X2) / 2, chamberCY, B.TUNNEL_Z2, 0);
     // stud boulders pressed against the chamber walls
     for (let i = 0; i < 26; i++) {
         const sz = B.TUNNEL_Z2 + 0.5 + hash2(i, 2) * (B.Z2 - B.TUNNEL_Z2 - 1);
@@ -6305,7 +6307,7 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
         const len = Math.hypot(run, rise);
         const m = new THREE.Mesh(new THREE.BoxGeometry(w, 0.1, len), bunkerFloorMat);
         m.position.set((x1 + x2) / 2, (yAtZ1 + yAtZ2) / 2 - 0.05, (z1 + z2) / 2);
-        m.rotation.x = Math.atan2(rise, run);
+        m.rotation.x = -Math.atan2(rise, run);
         m.receiveShadow = true;
         scene.add(m);
         castleSceneMeshes.push(m);
@@ -6379,7 +6381,7 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
         }
         const ladder = new THREE.Mesh(mergeGeometries(geos), ladderMat);
         ladder.position.set(B.OPEN_X2 - 0.30, topY, topZ);
-        ladder.rotation.x = ang;
+        ladder.rotation.x = -ang;
         scene.add(ladder);
         castleSceneMeshes.push(ladder);
     }
@@ -6566,22 +6568,35 @@ function updateBunkerPickups(dt) {
     }
 }
 
-// Context-sensitive "use" (E key / USE button): the trapdoor is the only
-// interactable. E falls through to weapon-next everywhere else.
+// Context-sensitive "use" (E key / USE button): the trapdoor and the ladder.
+// E falls through to weapon-next everywhere else.
 function getInteractContext() {
     if (window.__editorActive || gameOver || storyCastleSuppressed) return null;
-    if (!trapdoor || trapdoor.state === 'open' || trapdoor.state === 'opening') return null;
-    if (camera.position.y < 1.2) return null;   // below courtyard — no prompt through the floor
-    const dTrap = Math.hypot(camera.position.x - BUNKER.TRAPDOOR_X, camera.position.z - BUNKER.TRAPDOOR_Z);
-    if (dTrap >= 2.6) return null;
-    if (hasKey) return { id: 'trapdoor-unlock', text: 'Unlock the trapdoor' };
-    return { id: 'trapdoor-locked', text: 'Locked — find the key' };
+    if (bunkerState.phase === 'descending' || bunkerState.phase === 'ascending') return { id: 'busy', text: '' };
+    if (!trapdoor) return null;
+    if (bunkerState.phase === 'above') {
+        if (camera.position.y < 1.2) return null;   // below courtyard — no prompt through the floor
+        // Distance to the mouth RIM (not the centre): the hatch is used from
+        // its edge — you can't stand over the open hole to use it.
+        const mx = THREE.MathUtils.clamp(camera.position.x, BUNKER.OPEN_X1, BUNKER.OPEN_X2);
+        const mz = THREE.MathUtils.clamp(camera.position.z, BUNKER.OPEN_Z1, BUNKER.OPEN_Z2);
+        if (Math.hypot(camera.position.x - mx, camera.position.z - mz) >= 1.2) return null;
+        if (trapdoor.state === 'open' || trapdoor.state === 'opening') return { id: 'hatch-descend', text: 'Climb down the ladder' };
+        if (hasKey) return { id: 'trapdoor-unlock', text: 'Unlock the trapdoor' };
+        return { id: 'trapdoor-locked', text: 'Locked — find the key' };
+    }
+    // inside: climbing out happens at the ladder base
+    const dLadder = Math.hypot(camera.position.x - (BUNKER.OPEN_X2 - 0.5), camera.position.z - (BUNKER.OPEN_Z2 - 0.5));
+    if (dLadder < 1.7 && !playerWaterState && trapdoor.state === 'open') return { id: 'hatch-ascend', text: 'Climb up the ladder' };
+    return null;
 }
 
 function tryInteract() {
     const ctx = getInteractContext();
     if (!ctx) return false;
     switch (ctx.id) {
+        case 'busy':
+            return true;
         case 'trapdoor-locked':
             flashInteractPrompt();
             return true;
@@ -6590,13 +6605,19 @@ function tryInteract() {
             trapdoor.state = 'opening';
             playDrawbridgeCreak(0.4, 0.3);
             return true;
+        case 'hatch-descend':
+            beginBunkerTransition('down');
+            return true;
+        case 'hatch-ascend':
+            beginBunkerTransition('up');
+            return true;
     }
     return true;
 }
 
 function updateInteractPrompt() {
     const ctx = getInteractContext();
-    const show = !!ctx;
+    const show = !!ctx && ctx.id !== 'busy';
     if (interactPromptEl) {
         if (show) {
             interactPromptEl.style.display = 'block';
@@ -6615,6 +6636,54 @@ function flashInteractPrompt() {
     interactPromptEl.classList.remove('flash');
     void interactPromptEl.offsetWidth;
     interactPromptEl.classList.add('flash');
+}
+
+// Scripted ladder climb: two smoothstep segments (to the ladder line, then the
+// climb itself) with input suspended and mouse look live. Walking the ramp
+// also works — the ladder climb is the polished option.
+const LADDER_TOP = { x: 0.9, z: 75.8 }, LADDER_BASE = { x: 1.0, z: 80.5 };
+function beginBunkerTransition(dir) {
+    bunkerState.from.copy(camera.position);
+    if (dir === 'down') {
+        bunkerState.via.set(LADDER_TOP.x, PLAYER_BASE_Y, LADDER_TOP.z);
+        bunkerState.to.set(LADDER_BASE.x, BUNKER.RAMP1_BOT + PLAYER_BASE_Y, LADDER_BASE.z);
+    } else {
+        bunkerState.via.set(LADDER_TOP.x, PLAYER_BASE_Y, LADDER_TOP.z);
+        bunkerState.to.set(BUNKER.TRAPDOOR_X, PLAYER_BASE_Y, BUNKER.OPEN_Z1 - 1.0);
+    }
+    bunkerState.seg = 0;
+    bunkerState.t = 0;
+    bunkerState.phase = dir === 'down' ? 'descending' : 'ascending';
+    playerOnGround = false;
+    playerYVel = 0;
+    jumpQueued = false;
+}
+
+function updateBunkerTransition(dt) {
+    if (bunkerState.phase !== 'descending' && bunkerState.phase !== 'ascending') return;
+    const SEG_TIMES = [0.5, 1.7];
+    bunkerState.t += dt / SEG_TIMES[bunkerState.seg];
+    const t = Math.min(1, bunkerState.t);
+    const s = t * t * (3 - 2 * t);   // smoothstep
+    const a = bunkerState.seg === 0 ? bunkerState.from : bunkerState.via;
+    const b = bunkerState.seg === 0 ? bunkerState.via : bunkerState.to;
+    camera.position.lerpVectors(a, b, s);
+    if (t >= 1) {
+        if (bunkerState.seg === 0) {
+            bunkerState.seg = 1;
+            bunkerState.t = 0;
+        } else {
+            const goingDown = bunkerState.phase === 'descending';
+            bunkerState.phase = goingDown ? 'inside' : 'above';
+            camera.position.copy(bunkerState.to);
+            playerOnGround = true;
+            playerYVel = 0;
+            if (goingDown && !bunkerEverEntered) {
+                bunkerEverEntered = true;
+                kingSwitchTimer = BUNKER_FLOOD_DELAY_SEC;
+            }
+        }
+    }
 }
 
 // === Front-facing cloth banners that hang from the battlements ===
@@ -6659,6 +6728,22 @@ window.__bunkerTest = {
         world.raycastClosest(new CANNON.Vec3(fx, fy, fz), new CANNON.Vec3(tx, ty, tz),
             { collisionFilterMask: -1, skipBackfaces: true }, rc);
         return rc.hasHit ? { p: rc.hitPointWorld.toArray().map(v => +v.toFixed(2)) } : null;
+    },
+    meshProbe: (fx, fy, fz, tx, ty, tz) => {
+        const rc = new THREE.Raycaster(new THREE.Vector3(fx, fy, fz), new THREE.Vector3(tx - fx, ty - fy, tz - fz).normalize());
+        const hits = rc.intersectObjects(castleSceneMeshes, true);
+        return hits.length ? { d: +hits[0].distance.toFixed(2), name: hits[0].object.name || hits[0].object.type } : null;
+    },
+    // Raycast through a screen pixel (ndc -1..1); returns direction + first hits.
+    pixelProbe: (ndcX, ndcY, maxD = 60) => {
+        const rc = new THREE.Raycaster();
+        rc.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+        rc.far = maxD;
+        const hits = rc.intersectObjects(scene.children, true);
+        return {
+            dir: rc.ray.direction.toArray().map(v => +v.toFixed(3)),
+            hits: hits.slice(0, 2).map(h => ({ d: +h.distance.toFixed(2), name: h.object.name || h.object.type })),
+        };
     },
     blast: (x, y, z, r = 4) => triggerBlast(new THREE.Vector3(x, y, z), r),
     aim: (y, p) => { yaw = y; pitch = p; },
@@ -10694,6 +10779,7 @@ function updateKingsBunker(dt) {
         bunkerState.phase = 'above';
     }
     updateTrapdoor(dt);
+    updateBunkerTransition(dt);
     updateInteractPrompt();
     updateBunkerPickups(dt);
     updateKingPose(dt);
@@ -18199,8 +18285,10 @@ function animate() {
 
     // WASD + touch joystick movement along the horizontal plane (ignore pitch).
     // Keys are captured by drone controls while piloting � player stands still.
-    const moveForwardInput = activeDrone ? 0 : ((keys.w ? 1 : 0) - (keys.s ? 1 : 0) + touchControls.moveForward);
-    const moveRightInput   = activeDrone ? 0 : ((keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchControls.moveRight);
+    // Scripted ladder climbs drive the camera themselves (input suspended).
+    const bunkerScripted = bunkerState.phase === 'descending' || bunkerState.phase === 'ascending';
+    const moveForwardInput = (activeDrone || bunkerScripted) ? 0 : ((keys.w ? 1 : 0) - (keys.s ? 1 : 0) + touchControls.moveForward);
+    const moveRightInput   = (activeDrone || bunkerScripted) ? 0 : ((keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchControls.moveRight);
     const waterDrag = playerWaterState ? 0.26 : 1.0;
     if (Math.abs(moveForwardInput) > 0.001 || Math.abs(moveRightInput) > 0.001) {
         const fwd   = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
@@ -18214,7 +18302,7 @@ function animate() {
         }
     }
 
-    if (!playerWaterState && !gameOver) {
+    if (!playerWaterState && !gameOver && !bunkerScripted) {
         // Standing on bridge masonry above the waterline must not dunk the
         // player � the water test is 2D, so gate it on feet near ground level.
         const touchingWater = isPlayerInMoatWaterXZ(camera.position.x, camera.position.z)
@@ -18229,7 +18317,7 @@ function animate() {
     if (playerWaterState) {
         jumpQueued = false;
         updatePlayerWaterFall(dt);
-    } else {
+    } else if (!bunkerScripted) {
         // Space jump for P1 (works even while standing still).
         if (jumpQueued) {
             if (playerOnGround) {
