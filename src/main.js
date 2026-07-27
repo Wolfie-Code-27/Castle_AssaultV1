@@ -6283,6 +6283,14 @@ const bunkerTorches = [];         // { light, flame, baseI, phase }
     place(lumpPanel(tunLen, chamberH), B.OPEN_X2, chamberCY, tunCZ, -Math.PI / 2);
     place(lumpPanel(B.OPEN_X1 - B.X1, chamberH), (B.X1 + B.OPEN_X1) / 2, chamberCY, B.TUNNEL_Z2, 0);
     place(lumpPanel(B.X2 - B.OPEN_X2, chamberH), (B.OPEN_X2 + B.X2) / 2, chamberCY, B.TUNNEL_Z2, 0);
+    // Shaft south face (below the courtyard edge) + the band above the tunnel
+    // mouth: without these you're looking through the (invisible) island slab
+    // into the white skybox from inside the shaft.
+    place(lumpPanel(B.OPEN_X2 - B.OPEN_X1, chamberH), B.TRAPDOOR_X, chamberCY, B.OPEN_Z1, 0);
+    {
+        const bandH = (0.1 - B.CEIL_Y), bandCY = (0.1 + B.CEIL_Y) / 2;
+        place(lumpPanel(B.OPEN_X2 - B.OPEN_X1, bandH), B.TRAPDOOR_X, bandCY, B.OPEN_Z2, Math.PI);
+    }
     // stud boulders pressed against the chamber walls
     for (let i = 0; i < 26; i++) {
         const sz = B.TUNNEL_Z2 + 0.5 + hash2(i, 2) * (B.Z2 - B.TUNNEL_Z2 - 1);
