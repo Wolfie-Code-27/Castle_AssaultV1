@@ -6237,13 +6237,10 @@ const woodPlankMat = new THREE.MeshStandardMaterial({
 
     // Wooden great-hall floor over the rear half, raised one plank thickness —
     // built as boxes around the King's Bunker stairwell mouth so the hatch sits
-    // cleanly in the wood.
-    const woodTex = woodPlankTex.clone();
-    woodTex.needsUpdate = true;
-    woodTex.repeat.set(wX / 2.4, (wZ / 2) / 2.4);
-    const hallMat = new THREE.MeshStandardMaterial({
-        map: woodTex, roughness: 0.9, metalness: 0.0, color: 0xb89066
-    });
+    // cleanly in the wood. Box UVs are 0..1 PER PIECE, so each piece needs its
+    // own texture with a repeat sized to that piece — one shared repeat
+    // stretched differently on every slab and washed the floor out to flat
+    // orange (the raw material tint).
     const hallZ0 = czC, hallZ1 = z1 - 0.5;    // rear half (0.5m stone margin at the wall)
     const hallX0 = x0 + 0.5, hallX1 = x1 - 0.5;
     const hallRects = [
@@ -6255,7 +6252,15 @@ const woodPlankMat = new THREE.MeshStandardMaterial({
     for (const [hx0, hx1, hz0, hz1] of hallRects) {
         const hw = hx1 - hx0, hd = hz1 - hz0;
         if (hw <= 0 || hd <= 0) continue;
-        const piece = new THREE.Mesh(new THREE.BoxGeometry(hw, 0.24, hd), hallMat);
+        const pieceTex = makeWoodPlankTexture();
+        pieceTex.repeat.set(hw / 1.35, hd / 2.8);   // ~0.5 m plank rows, grain repeats every 1.35 m
+        pieceTex.anisotropy = 4;
+        // Tint deliberately dark: the 2.2-intensity sun overexposes mid-tone
+        // wood to flat orange (the trapdoor's 0x7a5c38 is the proven range).
+        const pieceMat = new THREE.MeshStandardMaterial({
+            map: pieceTex, roughness: 0.9, metalness: 0.0, color: 0x86653e
+        });
+        const piece = new THREE.Mesh(new THREE.BoxGeometry(hw, 0.24, hd), pieceMat);
         piece.position.set((hx0 + hx1) / 2, 0.12, (hz0 + hz1) / 2);
         piece.receiveShadow = true; piece.castShadow = true;
         scene.add(piece);
