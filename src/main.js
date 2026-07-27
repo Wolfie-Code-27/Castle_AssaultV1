@@ -2411,13 +2411,22 @@ function makeGrassTexture() {
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext("2d");
 
-    // Base � mottled green gradient so it isn't a flat slab of colour
-    const base = ctx.createLinearGradient(0, 0, W, H);
-    base.addColorStop(0,   "#3a5d1c");
-    base.addColorStop(0.5, "#456b20");
-    base.addColorStop(1,   "#365417");
-    ctx.fillStyle = base;
+    // Base: FLAT colour. Any corner-to-corner gradient baked into the tile
+    // turns the 24x24 repeat into a giant checkerboard of rectangles — all
+    // large-scale variation must come from blobs that average out per tile.
+    ctx.fillStyle = "#40631e";
     ctx.fillRect(0, 0, W, H);
+    // Big soft tone drifts (tile-safe: random blobs, no directional bias).
+    for (let i = 0; i < 26; i++) {
+        const x = Math.random() * W, y = Math.random() * H;
+        const r = 90 + Math.random() * 160;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        const lush = Math.random() < 0.5;
+        g.addColorStop(0, lush ? 'rgba(72,110,34,0.20)' : 'rgba(52,80,26,0.20)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+    }
 
     // Large soft colour patches (sun-bleached + lush + earthy)
     const patchCols = [
@@ -2467,14 +2476,7 @@ function makeGrassTexture() {
         ctx.fillRect(x, y, 1, 1);
     }
 
-    // Broad sunlight variation bands so terrain doesn't read as one flat carpet.
-    const sunBands = ctx.createLinearGradient(0, 0, W, H * 0.75);
-    sunBands.addColorStop(0.00, 'rgba(255,245,200,0.08)');
-    sunBands.addColorStop(0.35, 'rgba(255,255,255,0.00)');
-    sunBands.addColorStop(0.70, 'rgba(70,95,45,0.10)');
-    sunBands.addColorStop(1.00, 'rgba(35,60,22,0.16)');
-    ctx.fillStyle = sunBands;
-    ctx.fillRect(0, 0, W, H);
+    // (No baked sunlight gradient — it made every repeat visible as a tile.)
 
     // Tiny meadow flowers and dry straw flecks break up green repetition.
     const bloomCols = [
@@ -3194,6 +3196,35 @@ function rebuildTemplateGroundCarving(forceActive = null) {
 // === Rolling hills on the horizon (scenery only, no physics) ===
 // Two concentric rings of low-poly domes encircle the battlefield: a nearer
 // green band and a hazy blue-green far band that melts into the fog for depth.
+// Light neutral rock grain: strata bands + speckle. Mean is kept high (~225)
+// so a material's colour tint still reads true when the map multiplies it.
+function makeRockGrainTexture() {
+    const W = 256, H = 256;
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const x = c.getContext('2d');
+    x.fillStyle = '#e2e0dc'; x.fillRect(0, 0, W, H);
+    // Soft horizontal strata (wraps: drawn as full-width bands)
+    for (let i = 0; i < 22; i++) {
+        const y = Math.random() * H, h = 3 + Math.random() * 14;
+        const v = 195 + (Math.random() * 55) | 0;
+        x.fillStyle = `rgba(${v},${v - 3},${v - 8},${0.25 + Math.random() * 0.3})`;
+        x.fillRect(0, y, W, h);
+    }
+    // Mineral speckle + shadow pits
+    for (let i = 0; i < 2600; i++) {
+        const px = Math.random() * W, py = Math.random() * H;
+        const dark = Math.random() < 0.55;
+        const v = dark ? 150 + (Math.random() * 45 | 0) : 228 + (Math.random() * 26 | 0);
+        x.fillStyle = `rgba(${v},${v},${v - 6},${0.18 + Math.random() * 0.25})`;
+        x.fillRect(px, py, 1 + Math.random() * 2.2, 1 + Math.random() * 1.6);
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 4;
+    return t;
+}
+const rockGrainTex = makeRockGrainTexture();
+
 let hillNearMat = null;   // exposed for the seasons system
 let hillFarMat = null;
 // Ground footprints of the near-ring hills (x, z, r2). The hills are scenery
@@ -3202,9 +3233,14 @@ let hillFarMat = null;
 const npcHillBlockers = [];
 (function addHills() {
     const CZ = 74;  // ring centre (castle sits around z=74)
+    const hillGrainNear = rockGrainTex.clone();
+    hillGrainNear.repeat.set(6, 3);
+    hillGrainNear.needsUpdate = true;
     const hillNear = new THREE.MeshStandardMaterial({
-        color: 0x4d7838, roughness: 1.0, metalness: 0.0, flatShading: true
+        color: 0x4d7838, roughness: 1.0, metalness: 0.0, flatShading: true,
+        map: hillGrainNear,
     });
+    // Far ring stays untextured — it's fog-hazed sky-blend, grain would just shimmer.
     const hillFar = new THREE.MeshStandardMaterial({
         color: 0x7d9fb6, roughness: 1.0, metalness: 0.0, flatShading: true
     });
@@ -8772,9 +8808,12 @@ function buildStoryBridgeEncounter() {
     };
     const valleyRoadMat = new THREE.MeshStandardMaterial({ map: makeValleyRoadTexture(), color: 0x93866f, roughness: 0.96, metalness: 0.0 });
     const valleyRoadEdgeMat = new THREE.MeshStandardMaterial({ color: 0x9f937f, roughness: 0.92, metalness: 0.0 });
-    const valleyRockMatA = new THREE.MeshStandardMaterial({ color: 0x6f8e7b, roughness: 0.98, metalness: 0.0, flatShading: true });
-    const valleyRockMatB = new THREE.MeshStandardMaterial({ color: 0x5f7c6d, roughness: 0.98, metalness: 0.0, flatShading: true });
-    const valleyStonePatchMat = new THREE.MeshStandardMaterial({ color: 0x768072, roughness: 0.92, metalness: 0.0, flatShading: true });
+    const valleyRockGrain = rockGrainTex.clone();
+    valleyRockGrain.repeat.set(2.5, 2.5);
+    valleyRockGrain.needsUpdate = true;
+    const valleyRockMatA = new THREE.MeshStandardMaterial({ color: 0x6f8e7b, roughness: 0.98, metalness: 0.0, flatShading: true, map: valleyRockGrain });
+    const valleyRockMatB = new THREE.MeshStandardMaterial({ color: 0x5f7c6d, roughness: 0.98, metalness: 0.0, flatShading: true, map: valleyRockGrain });
+    const valleyStonePatchMat = new THREE.MeshStandardMaterial({ color: 0x768072, roughness: 0.92, metalness: 0.0, flatShading: true, map: valleyRockGrain });
     const shorelineShrubLeafMatA = new THREE.MeshStandardMaterial({ color: 0x4d6638, roughness: 0.97, metalness: 0.0, flatShading: true });
     const shorelineShrubLeafMatB = new THREE.MeshStandardMaterial({ color: 0x5f733f, roughness: 0.97, metalness: 0.0, flatShading: true });
     const shorelineShrubLeafMatDry = new THREE.MeshStandardMaterial({ color: 0x6b5836, roughness: 0.98, metalness: 0.0, flatShading: true });
