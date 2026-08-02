@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Town Level — Concept Mockup v3</title>
+<style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#0d1420; font-family:'Segoe UI',system-ui,sans-serif; }
+    #ui {
+        position:fixed; top:12px; left:12px; z-index:10; width:305px;
+        background:rgba(8,14,26,0.88); border:1px solid #2a3e5a; border-radius:10px;
+        padding:14px 16px; color:#dce6f5; font-size:13px; line-height:1.45;
+        box-shadow:0 4px 24px rgba(0,0,0,0.5);
+    }
+    #ui h1 { font-size:16px; margin:0 0 8px; color:#8fc0ff; letter-spacing:1px; }
+    #ui h2 { font-size:12px; margin:10px 0 4px; color:#f1c40f; text-transform:uppercase; letter-spacing:1px; }
+    #ui ul { margin:4px 0; padding-left:18px; }
+    #ui li { margin:2px 0; }
+    .chip { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:6px; vertical-align:-1px; }
+    #stats { font-family:monospace; font-size:12px; color:#aef0b0; }
+    .btnRow { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+    .btnRow button {
+        flex:1; min-width:70px; background:#16283f; color:#cfe0ff; border:1px solid #2a3e5a;
+        border-radius:6px; padding:6px 4px; font-size:12px; cursor:pointer;
+    }
+    .btnRow button:hover { background:#1f3a57; border-color:#8fc0ff; }
+    .btnRow button.active { background:#2a4a72; border-color:#8fc0ff; }
+    #hint { position:fixed; bottom:10px; left:50%; transform:translateX(-50%); color:#7d90ad; font-size:12px; z-index:10; }
+</style>
+</head>
+<body>
+<div id="ui">
+    <h1>🏘️ TOWN LEVEL — MOCKUP v3</h1>
+    <div>Advance up a rutted stone &amp; mud road. Houses at odd angles hide ambushers; the tavern guards the far end. <b>No two physical pieces overlap.</b></div>
+    <h2>Construction</h2>
+    <ul>
+        <li><span class="chip" style="background:#9aa3a8"></span>Stone brick walls + low yard walls</li>
+        <li><span class="chip" style="background:#6b4526"></span>Deep barge boards masking gable joins</li>
+        <li><span class="chip" style="background:#8a5a32"></span>Plank roofs, fascia, rail fences</li>
+        <li><span class="chip" style="background:#b03030"></span>NPC ambushers inside &amp; on balcony</li>
+    </ul>
+    <h2>Live piece count</h2>
+    <div id="stats"></div>
+    <h2>Views</h2>
+    <div class="btnRow">
+        <button id="vOverview" class="active">Overview</button>
+        <button id="vStreet">Street</button>
+    </div>
+    <div class="btnRow">
+        <button id="vTownhouse">Townhouse</button>
+        <button id="vAmbush">Ambush POV</button>
+    </div>
+    <div class="btnRow">
+        <button id="tRoofs">🏠 Roofs: ON</button>
+    </div>
+</div>
+<div id="hint">Left-drag orbit · wheel zoom · right-drag pan</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x9db8d8);
+scene.fog = new THREE.Fog(0x9db8d8, 140, 320);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 600);
+const controls = new OrbitControls(camera, renderer.domElement);
+camera.position.set(55, 45, 95);
+controls.target.set(0, 2, 0);
+
+// --- Lights ---
+scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x4a5a3a, 0.75));
+const sun = new THREE.DirectionalLight(0xfff2dd, 1.6);
+sun.position.set(60, 80, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -85, right: 85, top: 95, bottom: -95, far: 250 });
+scene.add(sun);
+
+// --- Ground ---
+const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshStandardMaterial({ color: 0x7fa05a, roughness: 0.95 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// --- Medieval road (static ground decoration, embedded — not physics pieces) ---
+const roadBase = new THREE.Mesh(
+    new THREE.BoxGeometry(10.5, 0.08, 116),
+    new THREE.MeshStandardMaterial({ color: 0x5f4c33, roughness: 1.0 })
+);
+roadBase.position.set(0, 0.04, 9);
+roadBase.receiveShadow = true;
+scene.add(roadBase);
+for (const rx of [-1.7, 1.7]) {   // cart wheel ruts worn into the mud
+    const rut = new THREE.Mesh(
+        new THREE.BoxGeometry(0.7, 0.085, 114),
+        new THREE.MeshStandardMaterial({ color: 0x483823, roughness: 1.0 }));
+    rut.position.set(rx, 0.045, 9);
+    scene.add(rut);
+}
+const cobbleGeo = new THREE.CylinderGeometry(0.34, 0.4, 0.14, 7);
+const cobbleInst = new THREE.InstancedMesh(cobbleGeo,
+    new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }), 900);
+cobbleInst.castShadow = false; cobbleInst.receiveShadow = true;
+scene.add(cobbleInst);
+{
+    const dm = new THREE.Object3D();
+    const c = new THREE.Color();
+    const greys = [0x8a8578, 0x7d6b52, 0x948d7d, 0x6f6555];
+    let n = 0;
+    while (n < 900) {
+        const x = (Math.random() + Math.random() - 1) * 5.0;    // denser mid-road
+        if (Math.abs(x) > 4.8) continue;
+        const z = -45 + Math.random() * 109;
+        dm.position.set(x, 0.09, z);
+        dm.rotation.set(0, Math.random() * Math.PI, 0);
+        dm.scale.set(0.65 + Math.random() * 0.75, 1, 0.65 + Math.random() * 0.75);
+        dm.updateMatrix();
+        cobbleInst.setMatrixAt(n, dm.matrix);
+        c.setHex(greys[(Math.random() * greys.length) | 0]).multiplyScalar(0.86 + Math.random() * 0.28);
+        cobbleInst.setColorAt(n, c);
+        n++;
+    }
+}
+for (let i = 0; i < 6; i++) {     // standing water in the low spots
+    const puddle = new THREE.Mesh(
+        new THREE.CircleGeometry(0.8 + Math.random() * 0.9, 20),
+        new THREE.MeshStandardMaterial({ color: 0x33404a, roughness: 0.15, metalness: 0.55 }));
+    puddle.rotation.x = -Math.PI / 2;
+    puddle.scale.y = 0.55 + Math.random() * 0.5;
+    puddle.position.set((Math.random() - 0.5) * 6, 0.093, -40 + Math.random() * 96);
+    scene.add(puddle);
+}
+
+// --- Instanced destructible-piece pools (game bricks: 2x1x1 stone, wood planks) ---
+// LAYOUT RULE: pieces may share faces (touching) but must never interpenetrate.
+const stoneBrickGeo = new THREE.BoxGeometry(2, 1, 1);
+const stoneCubeGeo  = new THREE.BoxGeometry(1, 1, 1);
+const plankGeo      = new THREE.BoxGeometry(1, 0.16, 2);
+
+const stoneMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 });
+const woodMat  = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85 });
+
+const brickInst = new THREE.InstancedMesh(stoneBrickGeo, stoneMat, 4000);
+const cubeInst  = new THREE.InstancedMesh(stoneCubeGeo,  stoneMat, 2500);
+const plankInst = new THREE.InstancedMesh(plankGeo,      woodMat, 3000);   // roof planks + fascia (toggleable)
+const trimInst  = new THREE.InstancedMesh(plankGeo,      woodMat, 1200);   // lintels + fences
+for (const m of [brickInst, cubeInst, plankInst, trimInst]) {
+    m.castShadow = true; m.receiveShadow = true;
+    scene.add(m);
+}
+let nBrick = 0, nCube = 0;
+const plankIdx = { n: 0 }, trimIdx = { n: 0 };
+const dummy = new THREE.Object3D();
+const col = new THREE.Color();
+const stoneBase = new THREE.Color(0x9aa3a8);
+const woodBase  = new THREE.Color(0x8a5a32);
+const trimBase  = new THREE.Color(0x6b4526);
+
+function jitter(base, amt) {
+    col.copy(base);
+    col.multiplyScalar(1 + (Math.random() * 2 - 1) * amt);
+    return col;
+}
+function addBrick(x, y, z, rotY = 0, sy = 1) {
+    dummy.position.set(x, y, z); dummy.rotation.set(0, rotY, 0); dummy.scale.set(1, sy, 1);
+    dummy.updateMatrix();
+    brickInst.setMatrixAt(nBrick, dummy.matrix);
+    brickInst.setColorAt(nBrick, jitter(stoneBase, 0.10));
+    nBrick++;
+}
+function addCube(x, y, z, rotY = 0) {
+    dummy.position.set(x, y, z); dummy.rotation.set(0, rotY, 0); dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    cubeInst.setMatrixAt(nCube, dummy.matrix);
+    cubeInst.setColorAt(nCube, jitter(stoneBase, 0.10));
+    nCube++;
+}
+// rotation order XYZ => Ry(rotY)·Rz(rotZ): tilt for the slope, then yaw with the house
+function addWood(inst, idx, x, y, z, rotY, rotZ, sx, sy, sz, base = woodBase) {
+    dummy.position.set(x, y, z); dummy.rotation.set(0, rotY, rotZ); dummy.scale.set(sx, sy, sz);
+    dummy.updateMatrix();
+    inst.setMatrixAt(idx.n, dummy.matrix);
+    inst.setColorAt(idx.n, jitter(base, 0.13));
+    idx.n++;
+}
+
+// --- House builder ------------------------------------------------------
+// Stone brick walls with stub-filled clean openings, stepped gables sealed by
+// wooden trapezoid infill up to the roof underside, plank roof with fascia,
+// optional yard (interlocked low stone wall or post-and-rail fence).
+// Clearances everywhere: nothing interpenetrates.
+function buildHouse(cx, cz, w, d, storeys, doorSide, rot = 0, opts = {}) {
+    const cosR = Math.cos(rot), sinR = Math.sin(rot);
+    const TW = (lx, lz) => [cx + lx * cosR + lz * sinR, cz - lx * sinR + lz * cosR];
+    const H = 3 * storeys;
+    const xc = w / 2 - 0.5, zc = d / 2 - 0.5;
+    const doorLX = doorSide * xc;
+    const doorLZ = ((d / 2) % 2 === 0) ? 0 : 1;
+
+    // openings on the door wall (side walls run along local Z)
+    const zWallOpenings = [{ lo: doorLZ - 1, hi: doorLZ + 1, y0: -0.1, y1: 2.1 }];
+    if (opts.balcony) zWallOpenings.push({ lo: doorLZ - 1, hi: doorLZ + 1, y0: 2.9, y1: 5.1 });
+    for (const fw of (opts.frontWins || []))
+        zWallOpenings.push({ lo: fw.z - 1, hi: fw.z + 1, y0: fw.y - 0.1, y1: fw.y + 1.1 });
+    // windows on the gable walls (run along local X), one per storey
+    const winC = (w % 4 === 0) ? 0 : 1;
+    const xWallOpenings = [];
+    for (let s = 0; s < storeys; s++)
+        xWallOpenings.push({ lo: winC - 1, hi: winC + 1, y0: 3 * s + 0.9, y1: 3 * s + 2.1 });
+
+    // remove pieces crossing an opening; refill 1 m stubs left outside its edges
+    function openingCull(openings, cy, c, half, mkStub) {
+        for (const o of openings) {
+            if (cy < o.y0 || cy > o.y1) continue;
+            if (c - half < o.hi - 0.01 && c + half > o.lo + 0.01) {
+                if (c - half <= o.lo - 0.9) mkStub(o.lo - 0.5);
+                if (c + half >= o.hi + 0.9) mkStub(o.hi + 0.5);
+                return true;
+            }
+        }
+        return false;
+    }
+    const rawCube = (lx, cy, lz) => { const [x, z] = TW(lx, lz); addCube(x, cy, z, rot); };
+
+    for (let y = 0; y < H; y++) {
+        const cy = y + 0.5, p = y % 2;
+        for (const szn of [-1, 1]) {                 // gable walls along local X
+            const lz = szn * zc;
+            const stub = sx => rawCube(sx, cy, lz);
+            const putB = lx => {
+                if (openingCull(xWallOpenings, cy, lx, 1, stub)) return;
+                const [x, z] = TW(lx, lz); addBrick(x, cy, z, rot);
+            };
+            const putC = lx => {
+                if (openingCull(xWallOpenings, cy, lx, 0.5, stub)) return;
+                rawCube(lx, cy, lz);
+            };
+            if (p === 0) {
+                for (let lx = -w / 2 + 1; lx <= w / 2 - 1; lx += 2) putB(lx);
+            } else {
+                putC(-(w / 2 - 0.5)); putC(w / 2 - 0.5);
+                for (let lx = -(w - 2) / 2 + 1; lx <= (w - 2) / 2 - 1; lx += 2) putB(lx);
+            }
+        }
+        for (const sxn of [-1, 1]) {                 // side walls along local Z
+            const lx = sxn * xc;
+            const ops = (lx === doorLX) ? zWallOpenings : [];
+            const stub = sz => rawCube(lx, cy, sz);
+            const putB = lz => {
+                if (openingCull(ops, cy, lz, 1, stub)) return;
+                const [x, z] = TW(lx, lz); addBrick(x, cy, z, rot + Math.PI / 2);
+            };
+            const putC = lz => {
+                if (openingCull(ops, cy, lz, 0.5, stub)) return;
+                rawCube(lx, cy, lz);
+            };
+            if (p === 0) {
+                for (let lz = -(d - 2) / 2 + 1; lz <= (d - 2) / 2 - 1; lz += 2) putB(lz);
+            } else {
+                putC(-(d / 2 - 1.5)); putC(d / 2 - 1.5);
+                for (let lz = -(d - 4) / 2 + 1; lz <= (d - 4) / 2 - 1; lz += 2) putB(lz);
+            }
+        }
+    }
+
+    // wooden door lintel — sits INSIDE the opening top (no overlap with masonry)
+    {
+        const [x, z] = TW(doorLX, doorLZ);
+        addWood(trimInst, trimIdx, x, 1.91, z, rot, 0, 0.9, 1, 0.99, trimBase);
+    }
+
+    // stepped stone gables
+    const gRows = (w - 2) / 2;
+    for (let g = 0; g < gRows; g++) {
+        const span = w - 2 * (g + 1);
+        const cy = H + g + 0.5;
+        for (const szn of [-1, 1]) {
+            const lz = szn * zc;
+            if ((H + g) % 2 === 1 && span >= 2) {
+                rawCube(-(span / 2 - 0.5), cy, lz); rawCube(span / 2 - 0.5, cy, lz);
+                for (let lx = -(span - 2) / 2 + 1; lx <= (span - 2) / 2 - 1; lx += 2) {
+                    const [x, z] = TW(lx, lz); addBrick(x, cy, z, rot);
+                }
+            } else {
+                for (let lx = -span / 2 + 1; lx <= span / 2 - 1; lx += 2) {
+                    const [x, z] = TW(lx, lz); addBrick(x, cy, z, rot);
+                }
+            }
+        }
+    }
+
+    // roof geometry: eave -> ridge line (per slope side)
+    const rise = gRows;
+    const ridgeY = H + rise + 1.0;
+    const ex = w / 2 + 0.6, ey = H + 0.25;          // eave point (local +x side)
+    const runLen = Math.hypot(ex, ridgeY - ey);
+    const cosT = ex / runLen, sinT = (ridgeY - ey) / runLen;
+    // roofline centre height at |x|, and its underside (planks are 0.16 thick)
+    const lineY = ax => ey + (ridgeY - ey) * (ex - ax) / ex;
+    const underY = ax => lineY(ax) - 0.08 / cosT;
+
+    // wooden plank roof — rows cut back at the ridge so opposite slopes never cross
+    const CB = 0.18;
+    const zPlanks = Math.ceil((d + 1) / 2);
+    const zScale = (d + 1) / (zPlanks * 2);
+    for (const sxn of [-1, 1]) {
+        const e0x = sxn * ex;
+        const dirX = -e0x, dirY = ridgeY - ey;
+        const rotZ = Math.atan2(dirY, dirX);
+        const span = runLen - CB;
+        const nRows = Math.ceil(span);
+        const step = span / nRows;
+        for (let i = 0; i < nRows; i++) {
+            const t = (i + 0.5) * step / runLen;
+            const plx = e0x + dirX * t, py = ey + dirY * t;
+            for (let j = 0; j < zPlanks; j++) {
+                const plz = -(d + 1) / 2 + (j * 2 + 1) * zScale;
+                const [x, z] = TW(plx, plz);
+                addWood(plankInst, plankIdx, x, py, z, rot, rotZ, step * 0.995, 1, zScale);
+            }
+        }
+    }
+    // ridge beam floats just clear of the plank top corners and caps the gap
+    {
+        const beamBottom = ridgeY - CB * sinT + 0.08 * cosT + 0.01;
+        const [x, z] = TW(0, 0);
+        addWood(plankInst, plankIdx, x, beamBottom + 0.12, z, rot, 0, 0.7, 1.5, (d + 1) / 2);
+    }
+    // eave fascia boards flush on the wall face, tucked under the plank underside
+    for (const sxn of [-1, 1]) {
+        const top = underY(w / 2 + 0.16) - 0.02;
+        const bottom = H - 0.2;
+        const [x, z] = TW(sxn * (w / 2 + 0.08), 0);
+        addWood(plankInst, plankIdx, x, (top + bottom) / 2, z, rot, 0,
+            0.16, (top - bottom) / 0.16, (d / 2) * 0.998, trimBase);
+    }
+    // deep barge boards on the gable verges, cut to fit UNDER the roof: the
+    // top edge runs 0.02 below the plank underside, each board's ridge end is
+    // cut so its top corner lands exactly on the apex line (the two end faces
+    // fan out from that shared point, so coverage is seamless), and the pair
+    // sit 0.18 apart in z within the verge overhang so nothing ever touches.
+    // 1.2 m deep — blankets the step triangles behind them.
+    {
+        const bh = 1.2;
+        for (const sxn of [-1, 1]) {
+            const e0x = sxn * ex;
+            const ux = -e0x / runLen, uy = (ridgeY - ey) / runLen;
+            const nx = -sxn * uy, ny = -ex / runLen;          // unit normal, under the roof
+            const tEnd = runLen * (1 - 0.10 * uy / ex);       // top corner exactly at apex
+            const tC = tEnd / 2;
+            const off = 0.10 + bh / 2;                        // hung below the plank underside
+            const bx = e0x + ux * tC + nx * off;
+            const by = ey + uy * tC + ny * off;
+            const rotZ = Math.atan2(uy, ux);
+            for (const szn of [-1, 1]) {
+                const bz = szn * (d / 2 + 0.12 + (sxn === 1 ? 0 : 0.18));
+                const [x, z] = TW(bx, bz);
+                addWood(plankInst, plankIdx, x, by, z, rot, rotZ,
+                    tEnd, bh / 0.16, 0.08, trimBase);
+            }
+        }
+    }
+
+    // --- yard: interlocked low stone wall or wooden post-and-rail fence ---
+    if (opts.yard) {
+        const A = w / 2 + 3, B = d / 2 + 3;          // wall outer corners at (±A, ±B)
+        if (opts.yard === 'stone') {
+            for (const szn of [-1, 1]) {             // runs along X at lz = ±(B-0.5)
+                const lz = szn * (B - 0.5);
+                for (let lx = -(A - 2); lx <= A - 2; lx += 2) {
+                    const [x, z] = TW(lx, lz); addBrick(x, 0.3, z, rot, 0.6);
+                }
+            }
+            for (const sxn of [-1, 1]) {             // runs along Z at lx = ±(A-0.5)
+                const lx = sxn * (A - 0.5);
+                const gated = (sxn === doorSide);
+                for (let lz = -(B - 2); lz <= B - 2; lz += 2) {
+                    if (gated && Math.abs(lz - doorLZ) < 2) continue;
+                    const [x, z] = TW(lx, lz); addBrick(x, 0.3, z, rot + Math.PI / 2, 0.6);
+                }
+            }
+            for (const sxn of [-1, 1]) for (const szn of [-1, 1]) {   // corner closers
+                const [x, z] = TW(sxn * (A - 0.5), szn * (B - 0.5));
+                dummy.position.set(x, 0.3, z); dummy.rotation.set(0, rot, 0); dummy.scale.set(1, 0.6, 1);
+                dummy.updateMatrix();
+                cubeInst.setMatrixAt(nCube, dummy.matrix);
+                cubeInst.setColorAt(nCube, jitter(stoneBase, 0.10));
+                nCube++;
+            }
+        } else {   // post-and-rail fence; rails nailed to the OUTSIDE of the posts
+            const post = (lx, lz) => {
+                const [x, z] = TW(lx, lz);
+                addWood(trimInst, trimIdx, x, 0.56, z, rot, 0, 0.15, 7, 0.075, trimBase);
+            };
+            const railZ = (lx, out, zA, zB) => {     // run along local Z
+                const [x, z] = TW(lx + out * 0.14, (zA + zB) / 2);
+                for (const ry of [0.42, 0.88])
+                    addWood(trimInst, trimIdx, x, ry, z, rot, 0, 0.09, 0.8, (zB - zA) / 2);
+            };
+            const railX = (lz, out, xA, xB) => {     // run along local X
+                const [x, z] = TW((xA + xB) / 2, lz + out * 0.14);
+                for (const ry of [0.42, 0.88])
+                    addWood(trimInst, trimIdx, x, ry, z, rot + Math.PI / 2, 0, 0.09, 0.8, (xB - xA) / 2);
+            };
+            const gLo = doorLZ - 1.8, gHi = doorLZ + 1.8;
+            for (const sxn of [-1, 1]) {
+                const lx = sxn * (A - 0.5), gated = (sxn === doorSide);
+                for (let lz = -(B - 0.5); lz <= B - 0.5; lz += 2)
+                    if (!(gated && lz > gLo && lz < gHi)) post(lx, lz);
+                if (gated) {
+                    post(lx, gLo); post(lx, gHi);
+                    railZ(lx, sxn, -(B - 0.5) + 0.15, gLo - 0.15);
+                    railZ(lx, sxn, gHi + 0.15, (B - 0.5) - 0.15);
+                } else {
+                    railZ(lx, sxn, -(B - 0.5) + 0.15, (B - 0.5) - 0.15);
+                }
+            }
+            for (const szn of [-1, 1]) {
+                const lz = szn * (B - 0.5);
+                for (let lx = -(A - 0.5) + 2; lx <= (A - 0.5) - 2; lx += 2) post(lx, lz);
+                railX(lz, szn, -(A - 0.5) + 0.65, (A - 0.5) - 0.65);
+            }
+        }
+    }
+
+    const [dx, dz] = TW(doorLX + doorSide * 1.4, doorLZ);
+    return {
+        door: [dx, dz],
+        out: [doorSide * cosR, -doorSide * sinR],
+        centre: [cx, cz],
+    };
+}
+
+// --- NPCs ---
+let nNpc = 0;
+function addNPC(x, z, rotY = 0, y = 0) {
+    const g = new THREE.Group();
+    const tunic = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.32, 0.42, 1.05, 10),
+        new THREE.MeshStandardMaterial({ color: 0xb03030, roughness: 0.8 }));
+    tunic.position.y = 0.85; tunic.castShadow = true;
+    const head = new THREE.Mesh(
+        new THREE.SphereGeometry(0.24, 12, 10),
+        new THREE.MeshStandardMaterial({ color: 0xf0c080, roughness: 0.7 }));
+    head.position.y = 1.62; head.castShadow = true;
+    const helm = new THREE.Mesh(
+        new THREE.ConeGeometry(0.26, 0.34, 10),
+        new THREE.MeshStandardMaterial({ color: 0x5d6d7e, metalness: 0.7, roughness: 0.3 }));
+    helm.position.y = 1.88;
+    const sword = new THREE.Mesh(
+        new THREE.BoxGeometry(0.07, 0.95, 0.07),
+        new THREE.MeshStandardMaterial({ color: 0xc8ccd0, metalness: 0.85, roughness: 0.2 }));
+    sword.position.set(0.5, 1.1, 0.1); sword.rotation.z = -0.5;
+    g.add(tunic, head, helm, sword);
+    g.position.set(x, y, z);
+    g.rotation.y = rotY;
+    scene.add(g);
+    nNpc++;
+}
+
+// --- Town layout: varied orientations, yards on some houses -------------
+// [cx, cz, w, d, storeys, doorSide, rot, opts]
+const HOUSES = [
+    // left row (doors generally face +x toward the road)
+    [-11,  -30, 8, 6, 1,  1,  0.14, { yard: 'wood'  }],
+    [-12,  -14, 6, 6, 2,  1, -0.10, {}],
+    [-11.5,  2, 8, 8, 1,  1,  Math.PI / 2, { yard: 'stone' }],   // gable to the street
+    [-12,   18, 6, 6, 1,  1, -0.22, {}],
+    [-11,   34, 8, 6, 2,  1,  0.09, { yard: 'stone' }],
+    // right row (doors face -x)
+    [11,   -24, 8, 6, 1, -1, -0.13, { yard: 'stone' }],
+    [12,    -8, 6, 6, 1, -1,  0.18, {}],
+    [11,     8, 8, 6, 2, -1, -Math.PI / 2, { yard: 'wood' }],    // gable to the street
+    [12,    24, 6, 8, 1, -1,  0.10, {}],
+    [11,    38, 6, 6, 1, -1, -0.24, { yard: 'wood' }],
+];
+for (const [cx, cz, w, d, s, ds, rot, opts] of HOUSES) {
+    const info = buildHouse(cx, cz, w, d, s, ds, rot, opts);
+    // ambusher in the doorway + one lurking inside
+    const [dx, dz] = info.door, [ox, oz] = info.out;
+    addNPC(dx + ox * 0.8, dz + oz * 0.8, Math.atan2(ox, oz));
+    const [ccx, ccz] = info.centre;
+    addNPC(ccx, ccz - 0.5, Math.atan2(dx - ccx, dz - ccz));
+}
+addNPC(-2.5, -18, 0.4); addNPC(3.2, 14, -0.6); addNPC(-1.5, 44, 0.1);
+
+// --- THE TOWNHOUSE: large 2-storey tavern anchoring the end of the road --
+// Local frame: +x = front (faces the player up the road); rot -90° maps +x to +z.
+const TH = { cx: 0, cz: -54, rot: -Math.PI / 2 };
+buildHouse(TH.cx, TH.cz, 10, 16, 2, 1, TH.rot, {
+    balcony: true,
+    frontWins: [{ z: -4, y: 4 }, { z: 4, y: 4 }],
+});
+
+const thd = new THREE.Group();            // decor group shares the house's local frame
+thd.position.set(TH.cx, 0, TH.cz);
+thd.rotation.y = TH.rot;
+scene.add(thd);
+{
+    const woodM   = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.85 });
+    const woodM2  = new THREE.MeshStandardMaterial({ color: 0x6b4526, roughness: 0.85 });
+    const darkM   = new THREE.MeshStandardMaterial({ color: 0x4e3418, roughness: 0.9 });
+    const stoneM  = new THREE.MeshStandardMaterial({ color: 0x9aa3a8, roughness: 0.9 });
+    const ironM   = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.7, roughness: 0.4 });
+    const greenM  = new THREE.MeshStandardMaterial({ color: 0x3e5a3a, roughness: 0.8 });
+    const M = (geo, mat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = m.receiveShadow = true; thd.add(m); return m; };
+
+    // balcony deck: five planks with gaps, clear of the wall face (x >= 5.01)
+    for (let i = 0; i < 5; i++)
+        M(new THREE.BoxGeometry(2.28, 0.13, 1.92), i % 2 ? woodM2 : woodM)
+            .position.set(6.16, 3.08, -4.1 + i * 2.05);
+    // support posts stop just under the deck; corner posts sit just above it
+    for (const pz of [-4.9, 4.9]) {
+        M(new THREE.BoxGeometry(0.24, 3.0, 0.24), darkM).position.set(7.05, 1.5, pz);
+        M(new THREE.BoxGeometry(0.18, 1.11, 0.18), darkM).position.set(7.15, 3.71, pz);
+    }
+    // railing: front rail rests on the corner posts; end rails stop clear of it
+    M(new THREE.BoxGeometry(0.14, 0.14, 9.88), woodM2).position.set(7.15, 4.34, 0);
+    for (const pz of [-5.02, 5.02])
+        M(new THREE.BoxGeometry(1.95, 0.14, 0.14), woodM2).position.set(6.02, 4.34, pz);
+    for (let bz = -4.4; bz <= 4.45; bz += 0.8)
+        M(new THREE.BoxGeometry(0.07, 1.08, 0.07), woodM).position.set(7.15, 3.72, bz);
+    // balcony door lintel inside its opening
+    M(new THREE.BoxGeometry(0.3, 0.22, 1.96), woodM2).position.set(4.8, 4.86, 0);
+
+    // saloon-style swing doors hung open — panels swing through the open doorway
+    for (const s of [-1, 1]) {
+        const hinge = new THREE.Group();
+        hinge.position.set(4.62, 0, s);
+        hinge.rotation.y = s * 0.65;
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(0.09, 1.35, 0.95), woodM);
+        panel.castShadow = true;
+        panel.position.set(0, 1.15, -s * 0.5);
+        hinge.add(panel);
+        for (const hy of [0.72, 1.52]) {             // iron straps on the panel face
+            const strap = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.09, 0.5), ironM);
+            strap.position.set(0.071, hy, -s * 0.28);
+            hinge.add(strap);
+        }
+        thd.add(hinge);
+    }
+    // stone steps: lower slab against the wall face, upper slab resting on it
+    M(new THREE.BoxGeometry(1.1, 0.2, 3.6), stoneM).position.set(5.56, 0.10, 0);
+    M(new THREE.BoxGeometry(0.6, 0.22, 3.0), stoneM).position.set(5.31, 0.31, 0);
+
+    // barrels & crates, spaced so nothing touches
+    const barrel = (x, z, tipped = false) => {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.36, 0.95, 12), woodM);
+        body.castShadow = true;
+        g.add(body);
+        for (const hy of [-0.28, 0.28]) {
+            const hoop = new THREE.Mesh(new THREE.CylinderGeometry(0.435, 0.435, 0.07, 12), ironM);
+            hoop.position.y = hy;
+            g.add(hoop);
+        }
+        if (tipped) { g.rotation.z = Math.PI / 2; g.position.set(x, 0.42, z); }
+        else g.position.set(x, 0.48, z);
+        thd.add(g);
+    };
+    barrel(5.65, -5.25); barrel(6.55, -5.95); barrel(5.85, -6.75);
+    barrel(5.8, 5.5); barrel(6.7, 6.2); barrel(6.3, 7.4, true);
+    M(new THREE.BoxGeometry(0.95, 0.95, 0.95), woodM2).position.set(5.6, 0.48, 3.5);
+    const crate2 = M(new THREE.BoxGeometry(0.8, 0.8, 0.8), woodM);
+    crate2.position.set(5.75, 0.4, -3.6); crate2.rotation.y = 0.45;
+
+    // hanging sign: "THE OLD CROWN"
+    {
+        const cnv = document.createElement('canvas');
+        cnv.width = 256; cnv.height = 128;
+        const ctx = cnv.getContext('2d');
+        ctx.fillStyle = '#4e3418'; ctx.fillRect(0, 0, 256, 128);
+        ctx.strokeStyle = '#c9a227'; ctx.lineWidth = 6; ctx.strokeRect(8, 8, 240, 112);
+        ctx.fillStyle = '#e8c84a'; ctx.font = 'bold 34px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText('THE OLD', 128, 55);
+        ctx.fillText('CROWN', 128, 98);
+        const signTex = new THREE.CanvasTexture(cnv);
+        M(new THREE.BoxGeometry(1.5, 0.12, 0.12), darkM).position.set(5.6, 5.7, 2.6);   // arm
+        const board = new THREE.Mesh(
+            new THREE.BoxGeometry(0.06, 0.85, 1.5),
+            [woodM2, woodM2, woodM2, woodM2,
+             new THREE.MeshStandardMaterial({ map: signTex }),
+             new THREE.MeshStandardMaterial({ map: signTex })]);
+        board.castShadow = true;
+        board.rotation.y = Math.PI / 2;
+        board.position.set(6.15, 5.0, 2.6);
+        thd.add(board);
+        for (const lz of [2.15, 3.05])               // chains between board top and arm
+            M(new THREE.BoxGeometry(0.04, 0.2, 0.04), ironM).position.set(6.15, 5.535, lz);
+    }
+
+    // window shutters flanking the upper front windows (proud of the wall face)
+    for (const wz of [-4, 4]) for (const s of [-1, 1])
+        M(new THREE.BoxGeometry(0.07, 1.15, 0.6), greenM).position.set(5.06, 4.5, wz + s * 1.38);
+
+    // external stone chimney on the gable end, clear of roof overhang AND barge boards
+    for (let cy = 0.55; cy <= 12.4; cy += 1.02)
+        M(new THREE.BoxGeometry(1.1, 1.0, 1.1), stoneM).position.set(0, cy, -9.45);
+    M(new THREE.BoxGeometry(1.5, 0.3, 1.5), stoneM).position.set(0, 13.08, -9.45);
+    // chimney breast bridging to the gable wall, below the barge-board line
+    M(new THREE.BoxGeometry(1.1, 5.4, 0.88), stoneM).position.set(0, 2.71, -8.45);
+
+    // lanterns either side of the entrance
+    for (const lz of [-2.6, 2.6]) {
+        M(new THREE.BoxGeometry(0.12, 2.3, 0.12), darkM).position.set(6.3, 1.15, lz);
+        const glow = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 10, 8),
+            new THREE.MeshStandardMaterial({ color: 0xffb060, emissive: 0xff9030, emissiveIntensity: 1.6 }));
+        glow.position.set(6.3, 2.46, lz);
+        thd.add(glow);
+        const pl = new THREE.PointLight(0xffa040, 6, 11);
+        pl.position.set(6.3, 2.55, lz);
+        thd.add(pl);
+    }
+}
+// townhouse garrison: doorway pair, balcony lookout, one on the road out front
+addNPC(0.7, -46.9, 0.15);
+addNPC(-1.2, -47.4, -0.1);
+addNPC(1.6, -47.9, 0, 3.15);      // balcony lookout
+addNPC(2.8, -44.5, 0.25);
+
+// --- Player cannon at the town entrance ---
+(function buildCannon() {
+    const g = new THREE.Group();
+    const barrelMesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.30, 0.4, 3.2, 14),
+        new THREE.MeshStandardMaterial({ color: 0x2f3438, metalness: 0.6, roughness: 0.4 }));
+    barrelMesh.rotation.x = Math.PI / 2 - 0.12;
+    barrelMesh.position.set(0, 1.32, -0.4);
+    barrelMesh.castShadow = true;
+    const carriage = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 2.2),
+        new THREE.MeshStandardMaterial({ color: 0x6b4a2a, roughness: 0.9 }));
+    carriage.position.y = 0.65; carriage.castShadow = true;
+    const wheelGeo = new THREE.CylinderGeometry(0.55, 0.55, 0.22, 16);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x59391d, roughness: 0.9 });
+    for (const s of [-1, 1]) {
+        const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(s * 0.78, 0.55, 0.3);
+        wheel.castShadow = true;
+        g.add(wheel);
+    }
+    g.add(barrelMesh, carriage);
+    g.position.set(0, 0, 62);
+    g.rotation.y = Math.PI;
+    scene.add(g);
+    scene.add(new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 2.6, 56), 10, 0x35e06a, 2.4, 1.4));
+})();
+
+// finalize instanced meshes
+brickInst.count = nBrick; cubeInst.count = nCube;
+plankInst.count = plankIdx.n; trimInst.count = trimIdx.n;
+for (const m of [brickInst, cubeInst, plankInst, trimInst, cobbleInst]) {
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+}
+
+// --- UI ---
+const stone = nBrick + nCube, wood = plankIdx.n + trimIdx.n;
+document.getElementById('stats').innerHTML =
+    `stone pieces &nbsp;${stone}<br>wood pieces &nbsp;&nbsp;${wood}<br>` +
+    `<b>total &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;${stone + wood}</b><br>` +
+    `houses 10 + townhouse &nbsp;|&nbsp; NPCs ${nNpc}`;
+
+const views = {
+    vOverview:  { pos: [55, 45, 95],      tgt: [0, 2, 0] },
+    vStreet:    { pos: [0, 2.6, 58],      tgt: [0, 2.2, -30] },
+    vTownhouse: { pos: [10, 6.5, -33],    tgt: [0, 4.5, -49] },
+    vAmbush:    { pos: [-4, 1.9, 27],     tgt: [-11, 1.6, 34] },
+};
+for (const id of Object.keys(views)) {
+    document.getElementById(id).addEventListener('click', () => {
+        camera.position.set(...views[id].pos);
+        controls.target.set(...views[id].tgt);
+        for (const b of document.querySelectorAll('.btnRow button')) b.classList.remove('active');
+        document.getElementById(id).classList.add('active');
+    });
+}
+document.getElementById('tRoofs').addEventListener('click', e => {
+    plankInst.visible = !plankInst.visible;
+    e.target.textContent = plankInst.visible ? '🏠 Roofs: ON' : '🏠 Roofs: OFF (peek inside)';
+});
+
+addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+    controls.update();
+    renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

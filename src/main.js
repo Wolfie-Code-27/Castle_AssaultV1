@@ -2642,6 +2642,29 @@ if (DEV_HIDE_ALL_GRASS) {
     grassMat.visible = false;
 }
 
+// Dev toggle: strip the procedural texture maps off the grass material so FPS
+// cost and blockiness can be judged against a flat-shaded baseline.
+let grassTextureEnabled = true;
+const grassBumpBaseMap = grassMat.bumpMap;
+const grassRoughBaseMap = grassMat.roughnessMap;
+let grassSeasonMap = grassMat.map;  // whichever map the current season wants (grass or snow)
+
+function syncGrassTextureState() {
+    const wantMap = grassTextureEnabled ? grassSeasonMap : null;
+    if (grassMat.map !== wantMap ||
+        grassMat.bumpMap !== (grassTextureEnabled ? grassBumpBaseMap : null)) {
+        grassMat.map = wantMap;
+        grassMat.bumpMap = grassTextureEnabled ? grassBumpBaseMap : null;
+        grassMat.roughnessMap = grassTextureEnabled ? grassRoughBaseMap : null;
+        grassMat.needsUpdate = true;  // one recompile per toggle — fine
+    }
+}
+
+function setGrassTextureEnabled(enabled) {
+    grassTextureEnabled = !!enabled;
+    syncGrassTextureState();
+}
+
 // Flat green used in Bridge-2 dev mode so z-fighting shows as a clean colour
 // shift rather than exploding texture noise, making it easier to diagnose.
 const grassFlatMat = new THREE.MeshStandardMaterial({
@@ -3493,11 +3516,10 @@ function applySeason(seasonKey, weatherKey) {
 
     // Ground + horizon tints.
     grassMat.color.setHex(s.grass);
-    const wantMap = s.grassMap ? (seasonKey === 'winter' ? snowGroundMap : grassBaseMap) : null;
-    if (grassMat.map !== wantMap) {
-        grassMat.map = wantMap;         // winter: snow texture; other seasons: grass map
-        grassMat.needsUpdate = true;    // one recompile per season switch � fine
-    }
+    // winter: snow texture; other seasons: grass map. Actual assignment goes
+    // through syncGrassTextureState so the dev grass-texture toggle is honoured.
+    grassSeasonMap = s.grassMap ? (seasonKey === 'winter' ? snowGroundMap : grassBaseMap) : null;
+    syncGrassTextureState();
     if (grassTuftsMesh) {
         grassTuftsMesh.material.color.setHex(s.tuft);
         grassTuftsMesh.visible = !DEV_HIDE_ALL_GRASS && s.tuftVisible;
@@ -7389,6 +7411,833 @@ buildNPC(60, 31, 0, Math.PI, 'axe');
     ];
 }
 
+// ============================================================
+// === TOWN LEVEL (Story Level 1) — "The Old Crown" ===========
+// ============================================================
+// A medieval town along a mud road south of the castle (z ≈ -49..+29).
+// The player starts at the south end (z ≈ -52) and fights north to the
+// tavern; when the town falls, the barman calls for backup and the story
+// advances to the bridge. Built lazily on first entry, then shown/hidden
+// with setTownSuppressed() exactly like the story bridge. Every
+// destructible piece is a standard brick/plank/slab tagged storyRole
+// 'town'. LAYOUT RULE: no two physical pieces ever spawn overlapping —
+// touching faces are fine, interpenetration explodes the solver.
+
+const TOWN_PLAYER_START_Z = -52;
+let townBuilt = false;
+let townSuppressed = true;          // becomes false once built (build = visible)
+let townLevelEnabled = false;       // dev-menu direct toggle ('twn')
+let townStageActive = false;
+let townStageCleared = false;       // carried through the retry payload once the town falls
+let _pendingTownDone = false;       // staged from sessionStorage before startGameWithDifficulty
+let townStageCompletePendingAdvance = false;
+let _townBackupTriggered = false;
+let _townBackupBannerAt = 0;
+let townHadGarrison = false;
+let townhouseBrickTotal = 0;
+let _townhouseHitsCached = 0;
+let townBarmanNpc = null;
+const townSceneMeshes = [];         // static visuals (road, decor group, fences, chimney cap…)
+const townSceneBodies = [];         // static colliders (balcony, steps, bar counter)
+const townDoorPosts = [];           // door-sentry spots emitted by the house builder
+
+const townTrimMat  = new THREE.MeshStandardMaterial({ color: 0x5d3f24, roughness: 0.9, metalness: 0.0 });
+const townGableTex = woodPlankTex.clone();
+townGableTex.rotation = Math.PI / 2;
+townGableTex.repeat.set(0.8, 0.55);
+townGableTex.needsUpdate = true;
+const townGableMat = new THREE.MeshStandardMaterial({
+    map: townGableTex, color: 0xa08a68, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide,
+});
+
+function markTownBrick(extra) {
+    const b = bricks[bricks.length - 1];
+    if (!b) return b;
+    b.storyRole = 'town';
+    if (b.body) b.body._storyRole = 'town';
+    if (extra) Object.assign(b, extra);
+    return b;
+}
+
+function townStaticBox(halfX, halfY, halfZ, x, y, z, rotY = 0) {
+    const body = new CANNON.Body({
+        mass: 0, material: brickPhysMat,
+        shape: new CANNON.Box(new CANNON.Vec3(halfX, halfY, halfZ)),
+        collisionFilterGroup: CGROUP_BRICK, collisionFilterMask: -1 ^ CGROUP_BRIDGE
+    });
+    body.position.set(x, y, z);
+    if (rotY) body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), rotY);
+    body._storyRole = 'town';
+    world.addBody(body);
+    townSceneBodies.push(body);
+    return body;
+}
+
+// Stone-brick house with a rigid wooden roof (hut pattern). Local frame:
+// door on the ±x face (doorSide), ridge along local z; `rot` yaws the whole
+// house. Houses at 0/±90° stay fully axis-aligned; jitter angles use the
+// tilt-quat brick variants. Openings use overlap-cull with 1 m stub refills
+// so doors/windows come out clean without ever double-placing a piece.
+function buildTownHouse(cx, cz, w, d, storeys, doorSide, rot, yardType, opts = {}) {
+    const cosR = Math.cos(rot), sinR = Math.sin(rot);
+    const TW = (lx, lz) => [cx + lx * cosR + lz * sinR, cz - lx * sinR + lz * cosR];
+    const H = 3 * storeys;
+    const xc = w / 2 - 0.5, zc = d / 2 - 0.5;
+    const doorLX = doorSide * xc;
+    const doorLZ = ((d / 2) % 2 === 0) ? 0 : 1;
+    const tag = opts.townhouse ? { isTownhouse: true } : null;
+
+    const quarter = Math.round(rot / (Math.PI / 2));
+    const axisAligned = Math.abs(rot - quarter * Math.PI / 2) < 1e-6;
+    const swapAxes = Math.abs(quarter % 2) === 1;
+    let qX = null, qZ = null;
+    if (!axisAligned) {
+        qX = new CANNON.Quaternion(); qX.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), rot);
+        qZ = new CANNON.Quaternion(); qZ.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), rot + Math.PI / 2);
+    }
+    const putBrick = (lx, ly, lz, axis) => {
+        const [x, z] = TW(lx, lz);
+        if (axisAligned) {
+            const worldAlongX = (axis === 'x') !== swapAxes;
+            if (worldAlongX) createBrick(x, ly, z); else createBrickZ(x, ly, z);
+        } else {
+            createBrickTiltQuat(x, ly, z, axis === 'x' ? qX : qZ);
+        }
+        markTownBrick(tag);
+    };
+    const putCube = (lx, ly, lz) => {
+        const [x, z] = TW(lx, lz);
+        if (axisAligned) createBrickCube(x, ly, z);
+        else createBrickCubeTiltQuat(x, ly, z, qX);
+        markTownBrick(tag);
+    };
+    const putSlab = (lx, ly, lz, axis) => {
+        const [x, z] = TW(lx, lz);
+        if (axisAligned) {
+            const worldAlongX = (axis === 'x') !== swapAxes;
+            if (worldAlongX) createBrickSlab(x, ly, z); else createBrickSlabZ(x, ly, z);
+        } else {
+            createBrickSlab(x, ly, z);
+            const s = bricks[bricks.length - 1];
+            s.body.quaternion.copy(axis === 'x' ? qX : qZ);
+            syncBrickVisualTransform(s);
+        }
+        markTownBrick();
+    };
+
+    // Openings: main door (+ balcony walk-out and upper front windows on the
+    // tavern) on the door wall; one window per storey on each gable wall.
+    const zWallOpenings = [{ lo: doorLZ - 1, hi: doorLZ + 1, y0: -0.1, y1: 2.1 }];
+    if (opts.balcony) zWallOpenings.push({ lo: doorLZ - 1, hi: doorLZ + 1, y0: 2.9, y1: 5.1 });
+    for (const fw of (opts.frontWins || []))
+        zWallOpenings.push({ lo: fw.z - 1, hi: fw.z + 1, y0: fw.y - 0.1, y1: fw.y + 1.1 });
+    const winC = (w % 4 === 0) ? 0 : 1;
+    const xWallOpenings = [];
+    for (let s = 0; s < storeys; s++)
+        xWallOpenings.push({ lo: winC - 1, hi: winC + 1, y0: 3 * s + 0.9, y1: 3 * s + 2.1 });
+
+    function openingCull(openings, cy, c, half, mkStub) {
+        for (const o of openings) {
+            if (cy < o.y0 || cy > o.y1) continue;
+            if (c - half < o.hi - 0.01 && c + half > o.lo + 0.01) {
+                if (c - half <= o.lo - 0.9) mkStub(o.lo - 0.5);
+                if (c + half >= o.hi + 0.9) mkStub(o.hi + 0.5);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    for (let y = 0; y < H; y++) {
+        const cy = y + 0.5, p = y % 2;
+        for (const szn of [-1, 1]) {                 // walls running along local X
+            const lz = szn * zc;
+            const stub = sx => putCube(sx, cy, lz);
+            const putB = lx => { if (!openingCull(xWallOpenings, cy, lx, 1, stub)) putBrick(lx, cy, lz, 'x'); };
+            const putC = lx => { if (!openingCull(xWallOpenings, cy, lx, 0.5, stub)) putCube(lx, cy, lz); };
+            if (p === 0) {
+                for (let lx = -w / 2 + 1; lx <= w / 2 - 1; lx += 2) putB(lx);
+            } else {
+                putC(-(w / 2 - 0.5)); putC(w / 2 - 0.5);
+                for (let lx = -(w - 2) / 2 + 1; lx <= (w - 2) / 2 - 1; lx += 2) putB(lx);
+            }
+        }
+        for (const sxn of [-1, 1]) {                 // walls running along local Z
+            const lx = sxn * xc;
+            const ops = (lx === doorLX) ? zWallOpenings : [];
+            const stub = sz => putCube(lx, cy, sz);
+            const putB = lz => { if (!openingCull(ops, cy, lz, 1, stub)) putBrick(lx, cy, lz, 'z'); };
+            const putC = lz => { if (!openingCull(ops, cy, lz, 0.5, stub)) putCube(lx, cy, lz); };
+            if (p === 0) {
+                for (let lz = -(d - 2) / 2 + 1; lz <= (d - 2) / 2 - 1; lz += 2) putB(lz);
+            } else {
+                putC(-(d / 2 - 1.5)); putC(d / 2 - 1.5);
+                for (let lz = -(d - 4) / 2 + 1; lz <= (d - 4) / 2 - 1; lz += 2) putB(lz);
+            }
+        }
+    }
+
+    // Wooden door lintel: a plank INSIDE the opening top (spans jamb to jamb,
+    // no overlap with the masonry course above).
+    {
+        const [x, z] = TW(doorLX, doorLZ);
+        // Door wall runs along local z: the plank is world-Z-aligned unless the
+        // house is quarter-turned.
+        if (axisAligned) createPlank(x, 1.62, z, !swapAxes, 1.94);
+        else {
+            createPlank(x, 1.62, z, false, 1.94);
+            const pl = bricks[bricks.length - 1];
+            pl.body.quaternion.copy(qZ);
+            syncBrickVisualTransform(pl);
+        }
+        markTownBrick();
+    }
+
+    // === Roof: one rigid dynamic body driving a plank-textured group (the
+    // proven hut pattern) — wooden, destructible as a whole, and it settles
+    // onto the wall tops instead of self-collapsing like loose sloped planks.
+    const eaveY = H + 0.10;                       // 10 cm settle gap above the wall tops
+    const ovX = 0.6, ovZ = 0.55;
+    const ridgeRise = w * 0.32;
+    const run = w / 2 + ovX;
+    const slopeLen = Math.hypot(run, ridgeRise);
+    const angle = Math.atan2(ridgeRise, run);
+    const panelLenZ = d + 2 * ovZ;
+
+    const roofTex = woodPlankTex.clone();
+    roofTex.rotation = Math.PI / 2;
+    roofTex.repeat.set(slopeLen / 1.4, panelLenZ / 1.6);
+    roofTex.needsUpdate = true;
+    const roofMat = new THREE.MeshStandardMaterial({ map: roofTex, color: 0x8a6a48, roughness: 0.95, metalness: 0.0 });
+
+    const roofGroup = new THREE.Group();
+    const [rgx, rgz] = TW(0, 0);
+    roofGroup.position.set(rgx, eaveY, rgz);
+    roofGroup.rotation.y = rot;
+    scene.add(roofGroup);
+
+    const slopeGeo = new THREE.BoxGeometry(slopeLen, 0.14, panelLenZ);
+    for (const sxn of [-1, 1]) {
+        const slope = new THREE.Mesh(slopeGeo, roofMat);
+        slope.castShadow = true; slope.receiveShadow = true;
+        slope.position.set(sxn * run / 2, ridgeRise / 2, 0);
+        slope.rotation.z = -sxn * angle;
+        roofGroup.add(slope);
+    }
+    const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, panelLenZ), townTrimMat);
+    ridge.castShadow = true;
+    ridge.position.set(0, ridgeRise + 0.05, 0);
+    roofGroup.add(ridge);
+    // wooden gable-end triangles: they mask the roof space AND ride with the
+    // roof body, so there are never open triangles or overlapping gable bricks
+    const gShape = new THREE.Shape();
+    gShape.moveTo(-w / 2, 0); gShape.lineTo(w / 2, 0); gShape.lineTo(0, ridgeRise);
+    gShape.closePath();
+    const gGeo = new THREE.ShapeGeometry(gShape);
+    for (const szn of [-1, 1]) {
+        const gm = new THREE.Mesh(gGeo, townGableMat);
+        gm.castShadow = true;
+        gm.position.z = szn * (d / 2 - 0.02);
+        roofGroup.add(gm);
+    }
+    // deep barge boards + eave fascia (the approved wooden-trim aesthetic)
+    for (const sxn of [-1, 1]) {
+        for (const szn of [-1, 1]) {
+            const bb = new THREE.Mesh(new THREE.BoxGeometry(slopeLen * 0.98, 0.5, 0.09), townTrimMat);
+            bb.castShadow = true;
+            bb.position.set(sxn * run / 2, ridgeRise / 2 - 0.28, szn * (d / 2 + 0.10));
+            bb.rotation.z = -sxn * angle;
+            roofGroup.add(bb);
+        }
+        const fascia = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.55, d + 0.7), townTrimMat);
+        fascia.castShadow = true;
+        fascia.position.set(sxn * (w / 2 + 0.10), 0.02, 0);
+        roofGroup.add(fascia);
+    }
+
+    const roofBody = new CANNON.Body({
+        mass: Math.round(60 + w * d * 0.9),
+        material: brickPhysMat,
+        allowSleep: true, sleepSpeedLimit: 0.4, sleepTimeLimit: 0.5,
+        linearDamping: 0.18, angularDamping: 0.34,
+        collisionFilterGroup: CGROUP_BRICK, collisionFilterMask: -1 ^ CGROUP_BRIDGE
+    });
+    const coreOffY = ridgeRise * 0.70;
+    roofBody.addShape(new CANNON.Box(new CANNON.Vec3(run * 0.55, ridgeRise * 0.34, panelLenZ * 0.44)));
+    // slim eave rails positioned OVER the wall bands so a disturbed roof
+    // settles onto the walls instead of dropping through the interior
+    const railHalf = new CANNON.Vec3(0.30, 0.11, d / 2 + 0.35);
+    for (const sxn of [-1, 1]) {
+        roofBody.addShape(new CANNON.Box(railHalf), new CANNON.Vec3(sxn * (w / 2 - 0.42), -coreOffY + 0.16, 0));
+    }
+    roofBody.position.set(rgx, eaveY + coreOffY, rgz);
+    if (rot) roofBody.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), rot);
+    roofBody._storyRole = 'town';
+    world.addBody(roofBody);
+    roofBody.sleep();
+    bricks.push({ idx: -1, isZ: false, body: roofBody, ix: rgx, iy: eaveY, iz: rgz,
+                  scored: true, isRoof: true, mesh: roofGroup, grp: CGROUP_BRICK, storyRole: 'town',
+                  offY: -coreOffY });
+
+    // === Yard: low stone slab wall or wooden post-and-rail fence ===
+    if (yardType === 'stone') {
+        const A = w / 2 + 3, B = d / 2 + 3;
+        for (const szn of [-1, 1])
+            for (let lx = -(A - 2); lx <= A - 2; lx += 2) putSlab(lx, 0.25, szn * (B - 0.5), 'x');
+        for (const sxn of [-1, 1]) {
+            const gated = (sxn === doorSide);
+            for (let lz = -(B - 2); lz <= B - 2; lz += 2) {
+                if (gated && Math.abs(lz - doorLZ) < 2) continue;
+                putSlab(sxn * (A - 0.5), 0.25, lz, 'z');
+            }
+        }
+    } else if (yardType === 'wood') {
+        const A = w / 2 + 3, B = d / 2 + 3;
+        const fg = new THREE.Group();
+        fg.position.set(cx, 0, cz);
+        fg.rotation.y = rot;
+        scene.add(fg);
+        townSceneMeshes.push(fg);
+        const postGeo = new THREE.BoxGeometry(0.15, 1.1, 0.15);
+        const gLo = doorLZ - 1.8, gHi = doorLZ + 1.8;
+        const addPost = (lx, lz) => {
+            const m = new THREE.Mesh(postGeo, townTrimMat);
+            m.castShadow = true; m.position.set(lx, 0.55, lz);
+            fg.add(m);
+        };
+        const addRail = (lx, lz, len, alongX) => {
+            for (const ry of [0.42, 0.85]) {
+                const m = new THREE.Mesh(
+                    new THREE.BoxGeometry(alongX ? len : 0.07, 0.09, alongX ? 0.07 : len), townTrimMat);
+                m.castShadow = true; m.position.set(lx, ry, lz);
+                fg.add(m);
+            }
+        };
+        for (const sxn of [-1, 1]) {
+            const lx = sxn * (A - 0.5), gated = (sxn === doorSide);
+            for (let lz = -(B - 0.5); lz <= B - 0.5; lz += 2)
+                if (!(gated && lz > gLo && lz < gHi)) addPost(lx, lz);
+            if (gated) {
+                addPost(lx, gLo); addPost(lx, gHi);
+                addRail(lx, (-(B - 0.5) + gLo) / 2, gLo + (B - 0.5) - 0.3, false);
+                addRail(lx, (gHi + (B - 0.5)) / 2, (B - 0.5) - gHi - 0.3, false);
+            } else {
+                addRail(lx, 0, 2 * B - 1.3, false);
+            }
+        }
+        for (const szn of [-1, 1]) {
+            const lz = szn * (B - 0.5);
+            for (let lx = -(A - 0.5) + 2; lx <= (A - 0.5) - 2; lx += 2) addPost(lx, lz);
+            addRail(0, lz, 2 * A - 2.3, true);
+        }
+    }
+
+    // Emit the door-sentry spot (just outside the doorway, facing the street).
+    const [ddx, ddz] = TW(doorLX + doorSide * 1.6, doorLZ);
+    townDoorPosts.push({ x: ddx, z: ddz, facing: Math.atan2(doorSide * cosR, -doorSide * sinR) });
+}
+
+// [cx, cz, w, d, storeys, doorSide, rot, yard]
+const TOWN_HOUSES = [
+    [-11,    7, 8, 6, 1,  1, -0.14, 'wood'],
+    [-12,   -4, 6, 6, 2,  1,  0.10, null],
+    [-11.5, -15, 8, 8, 1,  1, -Math.PI / 2, 'stone'],   // gable to the street
+    [-12,  -27, 6, 6, 1,  1,  0.22, null],
+    [-11,  -38, 8, 6, 2,  1, -0.09, 'stone'],
+    [ 11,    3, 8, 6, 1, -1,  0.13, 'stone'],
+    [ 12,   -8, 6, 6, 1, -1, -0.18, null],
+    [ 11,  -20, 8, 6, 2, -1,  Math.PI / 2, 'wood'],     // gable to the street
+    [ 12,  -32, 6, 8, 1, -1, -0.10, null],
+    [ 11,  -43, 6, 6, 1, -1,  0.24, 'wood'],
+];
+
+function buildTownEncounter() {
+    if (townBuilt) return;
+    townBuilt = true;
+
+    for (const [cx, cz, w, d, s, ds, rot, yard] of TOWN_HOUSES)
+        buildTownHouse(cx, cz, w, d, s, ds, rot, yard);
+
+    // The tavern: 2 storeys, balcony walk-out over the door, upper front
+    // windows, facing straight down the road at the advancing player.
+    buildTownHouse(0, 24, 10, 16, 2, 1, Math.PI / 2, null, {
+        balcony: true,
+        frontWins: [{ z: -4, y: 4 }, { z: 4, y: 4 }],
+        townhouse: true,
+    });
+    townhouseBrickTotal = 0;
+    for (const b of bricks) if (b.isTownhouse) townhouseBrickTotal++;
+
+    buildTownRoad();
+    buildTownhouseDecor();
+
+    townSuppressed = false;   // freshly built geometry is live
+    updateTotalBricksUi();
+}
+
+// Dev console probe: window._townProbe() dumps town/camera state;
+// window._townProbe.clearSky() forces a bright season for inspection.
+window._townProbe = () => {
+    const sample = bricks.find(b => b.storyRole === 'town' && b.body && b.idx >= 0);
+    return {
+        townBuilt, townSuppressed, townStageActive, townStageCleared,
+        cam: [camera.position.x, camera.position.y, camera.position.z],
+        yaw, pitch,
+        instCounts: { x: brickInstX.count, z: brickInstZ.count, c: brickInstC.count, h: brickInstH.count },
+        sampleTownBrick: sample ? [sample.body.position.x, sample.body.position.y, sample.body.position.z] : null,
+        seasonKey: currentSeasonKey, weatherKey: currentWeatherKey,
+    };
+};
+window._townProbe.clearSky = () => applySeason('summer', 'clear');
+window._townProbe.setView = (y, p) => {
+    yaw = y; pitch = p;
+    camera.rotation.y = y; camera.rotation.x = p;   // applies even while paused
+};
+window._townProbe.teleport = (x, y, z) => camera.position.set(x, y, z);
+window._townProbe.testShout = () => {
+    if (townBarmanNpc) spawnNpcTaunt(townBarmanNpc, 'TEST SHOUT');
+    const el = document.getElementById('popups');
+    return { count: el ? el.childElementCount : -1, html: el ? el.innerHTML.slice(0, 200) : null };
+};
+// Dev cheat: fell every town defender (not the barman) to exercise the
+// backup-call trigger without a full firefight.
+window._townProbe.slayDefenders = () => {
+    setPaused(false);
+    for (const n of npcList) {
+        if (n.storyRole !== 'town' || n.isTownBarman || n.isRagdoll) continue;
+        n.isRagdoll = true;
+        if (n.group) n.group.visible = false;
+        if (n.body) { n.body.collisionFilterMask = 0; n.body.sleep(); }
+    }
+    updateEnemyCountUi();
+};
+window._townProbe.renderInfo = () => ({
+    calls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+    fog: scene.fog ? [scene.fog.near, scene.fog.far] : null,
+    camFov: camera.fov, camFar: camera.far,
+});
+
+// Medieval stone-and-mud road: static ground decoration only (no physics
+// bodies — the world ground slab already provides collision at y=0).
+function buildTownRoad() {
+    const mud = new THREE.Mesh(
+        new THREE.BoxGeometry(10.5, 0.08, 78),
+        new THREE.MeshStandardMaterial({ color: 0x5f4c33, roughness: 1.0 }));
+    mud.position.set(0, 0.04, -14);
+    mud.receiveShadow = true;
+    scene.add(mud);
+    townSceneMeshes.push(mud);
+    for (const rx of [-1.7, 1.7]) {
+        const rut = new THREE.Mesh(
+            new THREE.BoxGeometry(0.7, 0.085, 76),
+            new THREE.MeshStandardMaterial({ color: 0x483823, roughness: 1.0 }));
+        rut.position.set(rx, 0.045, -14);
+        scene.add(rut);
+        townSceneMeshes.push(rut);
+    }
+    const N = 320;
+    const cobbleInst = new THREE.InstancedMesh(
+        new THREE.CylinderGeometry(0.34, 0.4, 0.14, 7),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 }), N);
+    cobbleInst.receiveShadow = true;
+    const cDummy = new THREE.Object3D();
+    const cCol = new THREE.Color();
+    const greys = [0x8a8578, 0x7d6b52, 0x948d7d, 0x6f6555];
+    let n = 0;
+    while (n < N) {
+        const x = (Math.random() + Math.random() - 1) * 5.0;
+        if (Math.abs(x) > 4.8) continue;
+        cDummy.position.set(x, 0.09, -49 + Math.random() * 66);
+        cDummy.rotation.set(0, Math.random() * Math.PI, 0);
+        cDummy.scale.set(0.65 + Math.random() * 0.75, 1, 0.65 + Math.random() * 0.75);
+        cDummy.updateMatrix();
+        cobbleInst.setMatrixAt(n, cDummy.matrix);
+        cCol.setHex(greys[(Math.random() * greys.length) | 0]).multiplyScalar(0.86 + Math.random() * 0.28);
+        cobbleInst.setColorAt(n, cCol);
+        n++;
+    }
+    scene.add(cobbleInst);
+    townSceneMeshes.push(cobbleInst);
+}
+
+// Tavern dressing: balcony (static, the lookout stands on it), swing doors,
+// barrels (dynamic knockables), bar counter, hanging sign, shutters,
+// lanterns, and an external stone-brick chimney (destructible cubes).
+function buildTownhouseDecor() {
+    const thd = new THREE.Group();            // shares the tavern's local frame
+    thd.position.set(0, 0, 24);
+    thd.rotation.y = Math.PI / 2;             // local +x faces the player (-z world)
+    scene.add(thd);
+    townSceneMeshes.push(thd);
+
+    const woodM  = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.85 });
+    const woodM2 = new THREE.MeshStandardMaterial({ color: 0x6b4526, roughness: 0.85 });
+    const darkM  = new THREE.MeshStandardMaterial({ color: 0x4e3418, roughness: 0.9 });
+    const stoneM = new THREE.MeshStandardMaterial({ color: 0x9aa3a8, roughness: 0.9 });
+    const ironM  = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.7, roughness: 0.4 });
+    const greenM = new THREE.MeshStandardMaterial({ color: 0x3e5a3a, roughness: 0.8 });
+    const M = (geo, mat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = m.receiveShadow = true; thd.add(m); return m; };
+
+    // Balcony deck (visual planks + one static collider so the lookout stands on it)
+    for (let i = 0; i < 5; i++)
+        M(new THREE.BoxGeometry(2.28, 0.13, 1.92), i % 2 ? woodM2 : woodM)
+            .position.set(6.16, 3.08, -4.1 + i * 2.05);
+    townStaticBox(1.15, 0.065, 5.05, 0, 3.08, 24 - 6.16, Math.PI / 2);
+    for (const pz of [-4.9, 4.9]) {
+        M(new THREE.BoxGeometry(0.24, 3.0, 0.24), darkM).position.set(7.05, 1.5, pz);
+        townStaticBox(0.12, 1.5, 0.12, pz, 1.5, 24 - 7.05);
+        M(new THREE.BoxGeometry(0.18, 1.11, 0.18), darkM).position.set(7.15, 3.71, pz);
+    }
+    M(new THREE.BoxGeometry(0.14, 0.14, 9.88), woodM2).position.set(7.15, 4.34, 0);
+    for (const pz of [-5.02, 5.02])
+        M(new THREE.BoxGeometry(1.95, 0.14, 0.14), woodM2).position.set(6.02, 4.34, pz);
+    for (let bz = -4.4; bz <= 4.45; bz += 0.8)
+        M(new THREE.BoxGeometry(0.07, 1.08, 0.07), woodM).position.set(7.15, 3.72, bz);
+    M(new THREE.BoxGeometry(0.3, 0.22, 1.96), woodM2).position.set(4.8, 4.86, 0);   // balcony lintel
+
+    // Saloon swing doors, hung open (visual — the doorway itself stays clear)
+    for (const s of [-1, 1]) {
+        const hinge = new THREE.Group();
+        hinge.position.set(4.62, 0, s);
+        hinge.rotation.y = s * 0.65;
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(0.09, 1.35, 0.95), woodM);
+        panel.castShadow = true;
+        panel.position.set(0, 1.15, -s * 0.5);
+        hinge.add(panel);
+        for (const hy of [0.72, 1.52]) {
+            const strap = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.09, 0.5), ironM);
+            strap.position.set(0.071, hy, -s * 0.28);
+            hinge.add(strap);
+        }
+        thd.add(hinge);
+    }
+
+    // Stone entrance steps (static, low enough for NPC step-up)
+    M(new THREE.BoxGeometry(1.1, 0.2, 3.6), stoneM).position.set(5.56, 0.10, 0);
+    townStaticBox(0.55, 0.10, 1.8, 0, 0.10, 24 - 5.56, Math.PI / 2);
+    M(new THREE.BoxGeometry(0.6, 0.22, 3.0), stoneM).position.set(5.31, 0.31, 0);
+    townStaticBox(0.30, 0.11, 1.5, 0, 0.31, 24 - 5.31, Math.PI / 2);
+
+    // Bar counter inside — the barman's post
+    M(new THREE.BoxGeometry(1.0, 1.2, 6.0), woodM2).position.set(-2, 0.6, 0);
+    M(new THREE.BoxGeometry(1.3, 0.08, 6.4), darkM).position.set(-2, 1.24, 0);
+    townStaticBox(0.5, 0.66, 3.2, 0, 0.66, 26, Math.PI / 2);
+
+    // Hanging sign: THE OLD CROWN
+    {
+        const cnv = document.createElement('canvas');
+        cnv.width = 256; cnv.height = 128;
+        const ctx = cnv.getContext('2d');
+        ctx.fillStyle = '#4e3418'; ctx.fillRect(0, 0, 256, 128);
+        ctx.strokeStyle = '#c9a227'; ctx.lineWidth = 6; ctx.strokeRect(8, 8, 240, 112);
+        ctx.fillStyle = '#e8c84a'; ctx.font = 'bold 34px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText('THE OLD', 128, 55);
+        ctx.fillText('CROWN', 128, 98);
+        const signTex = new THREE.CanvasTexture(cnv);
+        M(new THREE.BoxGeometry(1.5, 0.12, 0.12), darkM).position.set(5.6, 5.7, 2.6);
+        const board = new THREE.Mesh(
+            new THREE.BoxGeometry(0.06, 0.85, 1.5),
+            [woodM2, woodM2, woodM2, woodM2,
+             new THREE.MeshStandardMaterial({ map: signTex }),
+             new THREE.MeshStandardMaterial({ map: signTex })]);
+        board.castShadow = true;
+        board.rotation.y = Math.PI / 2;
+        board.position.set(6.15, 5.0, 2.6);
+        thd.add(board);
+        for (const lz of [2.15, 3.05])
+            M(new THREE.BoxGeometry(0.04, 0.2, 0.04), ironM).position.set(6.15, 5.535, lz);
+    }
+
+    // Shutters flanking the upper front windows
+    for (const wz of [-4, 4]) for (const s of [-1, 1])
+        M(new THREE.BoxGeometry(0.07, 1.15, 0.6), greenM).position.set(5.06, 4.5, wz + s * 1.38);
+
+    // Lanterns either side of the entrance
+    for (const lz of [-2.6, 2.6]) {
+        M(new THREE.BoxGeometry(0.12, 2.3, 0.12), darkM).position.set(6.3, 1.15, lz);
+        const glow = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 10, 8),
+            new THREE.MeshStandardMaterial({ color: 0xffb060, emissive: 0xff9030, emissiveIntensity: 1.6 }));
+        glow.position.set(6.3, 2.46, lz);
+        thd.add(glow);
+        const pl = new THREE.PointLight(0xffa040, 5, 10);
+        pl.position.set(6.3, 2.55, lz);
+        thd.add(pl);
+    }
+
+    // External stone chimney beside the west gable: a destructible cube stack
+    // (clear of the wall face and the roof overhang — nothing interpenetrates)
+    for (let i = 0; i < 9; i++) {
+        createBrickCube(-9.06, 0.5 + i, 24);
+        markTownBrick();
+    }
+    createBrickSlab(-9.06, 9.25, 24);
+    markTownBrick();
+
+    // Dynamic barrels stacked against the front wall — knockable props
+    const barrelSpots = [[-5.25, 18.35], [-5.95, 17.45], [-6.75, 18.15], [5.5, 18.2], [6.2, 17.3]];
+    for (const [bx, bz] of barrelSpots) spawnTownBarrel(bx, bz);
+}
+
+function spawnTownBarrel(x, z) {
+    const g = new THREE.Group();
+    const woodM = new THREE.MeshStandardMaterial({ color: 0x7a5230, roughness: 0.85 });
+    const ironM = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.7, roughness: 0.4 });
+    const bodyMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.36, 0.95, 12), woodM);
+    bodyMesh.castShadow = true;
+    g.add(bodyMesh);
+    for (const hy of [-0.28, 0.28]) {
+        const hoop = new THREE.Mesh(new THREE.CylinderGeometry(0.435, 0.435, 0.07, 12), ironM);
+        hoop.position.y = hy;
+        g.add(hoop);
+    }
+    g.position.set(x, 0.48, z);
+    scene.add(g);
+    const body = new CANNON.Body({
+        mass: 16, material: brickPhysMat,
+        shape: new CANNON.Cylinder(0.42, 0.36, 0.95, 10),
+        allowSleep: true, sleepSpeedLimit: 0.4, sleepTimeLimit: 0.5,
+        linearDamping: 0.2, angularDamping: 0.4,
+        collisionFilterGroup: CGROUP_BRICK, collisionFilterMask: -1 ^ CGROUP_BRIDGE
+    });
+    body.position.set(x, 0.48, z);
+    body._storyRole = 'town';
+    body._isPlank = true;   // wood impact sound
+    world.addBody(body);
+    body.sleep();
+    bricks.push({ idx: -1, body, ix: x, iy: 0.48, iz: z, scored: true, isRoof: true, mesh: g,
+                  grp: CGROUP_BRICK, storyRole: 'town', offY: 0 });
+}
+
+// Show/hide the whole town, mirroring setStoryBridgeSuppressed().
+function setTownSuppressed(suppressed) {
+    if (!townBuilt || townSuppressed === suppressed) return;
+    townSuppressed = suppressed;
+
+    for (const body of townSceneBodies) {
+        if (!body) continue;
+        if (suppressed) detachStoryBody(body);
+        else attachStoryBody(body);
+    }
+
+    for (const b of bricks) {
+        const role = b.storyRole || b.body?._storyRole || null;
+        if (role !== 'town') continue;
+        if (b.mesh) b.mesh.visible = !suppressed;
+        if (!b.body) continue;
+        if (suppressed) {
+            if (!b._storyPrevPos) {
+                b._storyPrevPos = new CANNON.Vec3(b.body.position.x, b.body.position.y, b.body.position.z);
+                b._storyPrevQuat = new CANNON.Quaternion(b.body.quaternion.x, b.body.quaternion.y, b.body.quaternion.z, b.body.quaternion.w);
+            }
+            b.body.position.set(0, -5000, 0);
+            b.body.velocity.set(0, 0, 0);
+            b.body.angularVelocity.set(0, 0, 0);
+            if (b._storyPrevMask === undefined) b._storyPrevMask = b.body.collisionFilterMask;
+            b.body.collisionFilterMask = 0;
+            b.body.sleep();
+            detachStoryBody(b.body);
+            syncBrickVisualTransform(b);
+        } else if (b._storyPrevMask !== undefined) {
+            attachStoryBody(b.body);
+            b.body.collisionFilterMask = b._storyPrevMask;
+            if (b._storyPrevPos) {
+                b.body.position.copy(b._storyPrevPos);
+                if (b._storyPrevQuat) b.body.quaternion.copy(b._storyPrevQuat);
+            }
+            b.body.sleep();
+            syncBrickVisualTransform(b);
+        }
+    }
+
+    for (const m of townSceneMeshes) {
+        if (m) m.visible = !suppressed;
+    }
+
+    if (suppressed) {
+        for (const npc of npcList) {
+            if (npc.storyRole === 'town') setNpcStoryDormant(npc, true);
+        }
+    }
+}
+
+function countTownDefenders() {
+    let alive = 0;
+    for (const npc of npcList) {
+        if (npc.storyRole !== 'town' || npc.isRagdoll || npc.isTownBarman) continue;
+        alive++;
+    }
+    return alive;
+}
+
+function spawnTownGarrison(diffKey) {
+    townBarmanNpc = null;
+    // Rebuild the town wave cleanly on each town-stage entry.
+    for (let i = npcList.length - 1; i >= 0; i--) {
+        const n = npcList[i];
+        if (n.storyRole !== 'town') continue;
+        if (!n.isRagdoll && n.group) scene.remove(n.group);
+        npcList.splice(i, 1);
+    }
+    if (guardsDisabled) return;
+
+    const byDiff = { squire: 5, knight: 8, warlord: 12, modern: 13, extreme: 14 };
+    const sentries = Math.min(townDoorPosts.length, byDiff[diffKey] ?? 8);
+    for (let i = 0; i < sentries; i++) {
+        const p = townDoorPosts[i];
+        const roll = Math.random();
+        const weapon = roll < 0.18 ? 'bow' : (roll < 0.45 ? 'axe' : 'sword');
+        const npc = buildNPC(p.x, p.z, 0, p.facing, weapon);
+        npc.isTowerGuard = false;
+        npc.arrowTimer = 0;
+        npc.storyRole = 'town';
+        npc.walking = false;
+        npc.waypoints = [];
+        npc.chaseOffsetX = (Math.random() - 0.5) * 6;
+    }
+    // Tavern porch pair flanking the door (clear of the entrance steps)
+    for (const dx of [-1.6, 1.6]) {
+        const npc = buildNPC(dx, 17.2, 0, Math.PI, dx < 0 ? 'axe' : 'sword');
+        npc.isTowerGuard = false;
+        npc.arrowTimer = 0;
+        npc.storyRole = 'town';
+        npc.chaseOffsetX = dx * 2;
+    }
+    // Balcony lookout: an archer rooted above the door. yBase > 0 makes him a
+    // tower guard (stationary, fires on the arrow cadence); no merlon post —
+    // the tower-post logic is castle-specific and would walk him off the deck.
+    {
+        const npc = buildNPC(1.5, 17.6, 3.15, Math.PI, 'bow');
+        npc.storyRole = 'town';
+    }
+    // The barman, unarmed behind his counter until the town falls
+    {
+        const npc = buildNPC(0, 27.2, 0, Math.PI, 'none');
+        npc.storyRole = 'town';
+        npc.isTownBarman = true;
+        npc.isTowerGuard = true;   // rooted: tower-guard flag keeps him at his post
+        npc.walking = false;
+        npc.waypoints = [];
+        townBarmanNpc = npc;
+    }
+}
+
+function beginTownStage(campaignMode) {
+    bridge2ModeActive = false;
+    storyModeEnabled = true;
+    storyCampaignActive = !!campaignMode;
+    townStageActive = true;
+    storyStage = 1;   // town runs its own progression branch ahead of the stage checks
+
+    camera.position.set(0, PLAYER_BASE_Y, TOWN_PLAYER_START_Z);
+    yaw = Math.PI;    // face north, up the road toward the tavern
+    pitch = 0.04;
+
+    buildTownEncounter();
+    setTownSuppressed(false);
+    setStoryBridgeSuppressed(true);
+    setStoryCastleSuppressed(true);
+
+    spawnTownGarrison(currentDifficulty);
+    for (const npc of npcList) {
+        if (!npc.storyRole) npc.storyRole = 'castle';
+        setNpcStoryDormant(npc, npc.storyRole !== 'town');
+    }
+    if (ballista) {
+        ballista.storyDormant = true;
+        ballista.group.visible = false;
+    }
+
+    _townBackupTriggered = false;
+    _townBackupBannerAt = 0;
+    _townhouseHitsCached = 0;
+    townStageCompletePendingAdvance = false;
+    updateTotalBricksUi();
+    const alive = countTownDefenders();
+    townHadGarrison = alive > 0;
+    if (alive > 0) {
+        setStoryHud(storyCampaignActive
+            ? `Story 1/3: Raid the town — fight to The Old Crown (${alive} defenders)`
+            : `Town Level: Raid the town (${alive} defenders)`);
+    } else {
+        setStoryHud(storyCampaignActive
+            ? 'Story 1/3: Town sandbox (NPCs disabled)'
+            : 'Town Level: Sandbox (NPCs disabled)');
+    }
+}
+
+function updateTownProgression() {
+    if (townStageCompletePendingAdvance) return;
+    const now = performance.now();
+    if (_townBackupTriggered) {
+        if (now >= _townBackupBannerAt) showTownStageEndBanner();
+        return;
+    }
+    const alive = countTownDefenders();
+    // Throttled tavern-breach check: enough of The Old Crown's masonry down
+    if ((_frameCount & 31) === 0) {
+        let hits = 0;
+        rebuildStoryBrickCachesIfNeeded();
+        for (const b of getStoryRoleBricks('town')) {
+            if (b.isTownhouse && b.scored) hits++;
+        }
+        _townhouseHitsCached = hits;
+    }
+    const breachAt = Math.min(30, Math.max(12, Math.ceil(townhouseBrickTotal * 0.18)));
+    const breached = townhouseBrickTotal > 0 && _townhouseHitsCached >= breachAt;
+
+    if ((townHadGarrison && alive === 0) || breached) {
+        _townBackupTriggered = true;
+        _townBackupBannerAt = now + 3400;
+        const barmanAlive = townBarmanNpc && !townBarmanNpc.isRagdoll;
+        if (barmanAlive) {
+            spawnNpcTaunt(townBarmanNpc, "I'M CALLING BACKUP!");
+            setTimeout(() => {
+                if (townBarmanNpc && !townBarmanNpc.isRagdoll && !gameOver && townStageActive)
+                    spawnNpcTaunt(townBarmanNpc, 'BACKUP! FALL BACK TO THE BRIDGE!');
+            }, 1700);
+        }
+        setStoryHud(storyCampaignActive
+            ? "Story 1/3: The barman is calling for backup!"
+            : 'Town Level: The barman is calling for backup!');
+        return;
+    }
+
+    if (townHadGarrison) {
+        setStoryHud(storyCampaignActive
+            ? `Story 1/3: Raid the town — fight to The Old Crown (${alive} defenders)`
+            : `Town Level: Raid the town (${alive} defenders)`);
+    }
+}
+
+function showTownStageEndBanner() {
+    if (townStageCompletePendingAdvance) return;
+    townStageCompletePendingAdvance = true;
+    gameOverPending = false;
+    setPaused(true);
+    setStoryHud('Town Raided — Backup Inbound');
+    if (document.pointerLockElement === renderer.domElement) {
+        document.exitPointerLock();
+    }
+    const go = document.getElementById('gameOver');
+    const goMsg = document.getElementById('goMsg');
+    const goScores = document.getElementById('goScores');
+    const goBestEl = document.getElementById('goBest');
+    if (go) go.style.display = 'flex';
+    if (goBestEl) goBestEl.style.display = 'none';
+    if (goRetryBtn) goRetryBtn.textContent = 'Next Level';
+    if (goMenuBtn) goMenuBtn.textContent = 'Menu';
+    const bestDamageText = bestShotDamage.toFixed(1);
+    const eff = shotsFired > 0 ? (bricksDestroyed / shotsFired) : 0;
+    if (goMsg) goMsg.textContent = '"I\'M CALLING BACKUP!" — they fall back to the bridge';
+    if (goScores) {
+        goScores.textContent =
+            `Score ${score} • Bricks ${bricksDestroyed} • Shots ${shotsFired} • Best Shot Damage ${bestDamageText} • Efficiency ${eff.toFixed(2)} bricks/shot`;
+    }
+}
+
 const STORY_BRIDGE_Z = (M_OZ1 + M_OZ2) * 0.5;
 const STORY_BRIDGE_HALF_SPAN = 20;
 const STORY_BRIDGE_WATER_HALF_X = BRIDGE_WATER_MAX_X;
@@ -9922,6 +10771,9 @@ function attachStoryBody(body) {
 }
 
 function getActiveStoryRole() {
+    // Town stage owns the frame whenever it is active (both castle and
+    // bridge are suppressed while the town is up).
+    if (townStageActive) return 'town';
     // In classic/new-level modes we can still have one role explicitly
     // suppressed; treat the visible role as active so brick counts and
     // per-frame brick loops don't include hidden-level geometry.
@@ -9936,15 +10788,18 @@ function getActiveStoryRole() {
 
 let storyBridgeBrickCache = [];
 let storyCastleBrickCache = [];
+let storyTownBrickCache = [];
 let storyBrickCacheSize = -1;
 
 function rebuildStoryBrickCachesIfNeeded() {
     if (storyBrickCacheSize === bricks.length) return;
     storyBridgeBrickCache = [];
     storyCastleBrickCache = [];
+    storyTownBrickCache = [];
     for (const b of bricks) {
         const role = b.storyRole || b.body?._storyRole || 'castle';
         if (role === 'bridge') storyBridgeBrickCache.push(b);
+        else if (role === 'town') storyTownBrickCache.push(b);
         else storyCastleBrickCache.push(b);
     }
     storyBrickCacheSize = bricks.length;
@@ -9953,7 +10808,9 @@ function rebuildStoryBrickCachesIfNeeded() {
 function getStoryRoleBricks(role) {
     if (!role) return bricks;
     rebuildStoryBrickCachesIfNeeded();
-    return role === 'bridge' ? storyBridgeBrickCache : storyCastleBrickCache;
+    if (role === 'bridge') return storyBridgeBrickCache;
+    if (role === 'town') return storyTownBrickCache;
+    return storyCastleBrickCache;
 }
 
 function getFrameActiveBricks() {
@@ -10049,7 +10906,7 @@ function setStoryCastleSuppressed(suppressed) {
 
     for (const b of bricks) {
         const role = b.storyRole || b.body?._storyRole || null;
-        if (role === 'bridge') continue;
+        if (role === 'bridge' || role === 'town') continue;   // town has its own suppressor
         const mesh = b.mesh;
         if (mesh) mesh.visible = !suppressed;
         if (!b.body) continue;
@@ -13946,11 +14803,11 @@ function beginBridgeStage(campaignMode) {
     storyBridgeHadNpcWave = alive > 0;
     if (alive > 0) {
         setStoryHud(storyCampaignActive
-            ? `Story 1/2: Shatter the bridge crossing (${alive} left)`
+            ? `Story 2/3: Shatter the bridge crossing (${alive} left)`
             : `Bridge Level: Break the crossing defenders (${alive} left)`);
     } else {
         setStoryHud(storyCampaignActive
-            ? 'Story 1/2: Bridge tunnel sandbox (NPCs disabled)'
+            ? 'Story 2/3: Bridge tunnel sandbox (NPCs disabled)'
             : 'Bridge Level: Tunnel sandbox (NPCs disabled)');
     }
 }
@@ -14075,6 +14932,8 @@ function beginStoryModeRound() {
     _applyGroundMaterial(grassMat);  // restore textured grass for any non-bridge2 level
     setTemplateGroundOverrideActive(false);
     bridge2ModeActive = false;
+    townStageActive = false;
+    if (townBuilt) setTownSuppressed(true);   // re-shown by beginTownStage when routed there
     applyRandomSeason();   // every level/round rolls a fresh season + weather
 
     if (bridgeDevLevelEnabled) {
@@ -14092,15 +14951,31 @@ function beginStoryModeRound() {
         return;
     }
 
+    // Dev-menu direct town toggle (skipped once the town has been cleared so
+    // the post-town "Next Level" reload lands on the bridge, not town again).
+    if (townLevelEnabled && !townStageCleared) {
+        beginTownStage(false);
+        return;
+    }
+
     // Guard-disable mode should not force a castle fallback. Keep bridge
     // routing intact and use non-campaign bridge sandbox when guards are off.
     const storyRequested = storyModePreference && !twoPlayerMode;
     if (storyRequested) {
+        // Story campaign order: Town -> Bridge -> Castle heist.
+        if (!townStageCleared) {
+            beginTownStage(!guardsDisabled);
+            return;
+        }
         beginBridgeStage(!guardsDisabled);
         return;
     }
 
     storyCampaignActive = false;
+    if (levelPreference === 'town') {
+        beginTownStage(false);
+        return;
+    }
     if (levelPreference === 'bridge') {
         beginBridgeStage(false);
         return;
@@ -14246,7 +15121,7 @@ function advanceToCastleStage() {
 }
 
 function updateStoryBridgeConvoy(dt) {
-    if (!storyModeEnabled || storyStage !== 1) return;
+    if (!storyModeEnabled || storyStage !== 1 || townStageActive) return;
     for (const npc of npcList) {
         if (npc.isRagdoll || !npc.storyBridgeWalker || npc.storyDormant) continue;
         if (npc.isTowerGuard) npc.isTowerGuard = false;
@@ -14441,6 +15316,11 @@ function updateStoryProgression() {
     if (bridge2ModeActive) return;
     if (!storyModeEnabled || gameOver || !(_gameStarted || _hasPlayed) || guardsDisabled) return;
 
+    if (townStageActive) {
+        updateTownProgression();
+        return;
+    }
+
     if (storyStage === 1) {
         if (bridgeStageCompletePendingAdvance) return;
         const aliveBridge = countAliveStoryNpcs('bridge');
@@ -14448,7 +15328,7 @@ function updateStoryProgression() {
             bridgeStageClearPendingAt = 0;
             bridgeStageClearCalmSince = 0;
             setStoryHud(storyCampaignActive
-                ? `Story 1/2: Shatter the bridge crossing (${aliveBridge} left)`
+                ? `Story 2/3: Shatter the bridge crossing (${aliveBridge} left)`
                 : `Bridge Level: Break the crossing defenders (${aliveBridge} left)`);
         } else if (storyBridgeHadNpcWave) {
             const now = performance.now();
@@ -14472,14 +15352,14 @@ function updateStoryProgression() {
                 showBridgeStageEndBanner();
             } else {
                 setStoryHud(storyCampaignActive
-                    ? 'Story 1/2: Last guard down - hold the line...'
+                    ? 'Story 2/3: Last guard down - hold the line...'
                     : 'Bridge Level: Last guard down - hold the line...');
             }
         } else {
             bridgeStageClearPendingAt = 0;
             bridgeStageClearCalmSince = 0;
             setStoryHud(storyCampaignActive
-                ? 'Story 1/2: Bridge tunnel sandbox (NPCs disabled)'
+                ? 'Story 2/3: Bridge tunnel sandbox (NPCs disabled)'
                 : 'Bridge Level: Tunnel sandbox (NPCs disabled)');
         }
         return;
@@ -14598,13 +15478,30 @@ function showGameOver(killedByArrows = false, storyVictory = false, defeatReason
 }
 
 function retryCurrentLevel() {
+    if (townStageCompletePendingAdvance) {
+        // Town raided -> advance to the bridge. townDone routes the reload past
+        // the town stage (story campaign continues; dev-toggle runs land on the
+        // classic bridge level).
+        try {
+            sessionStorage.setItem('castleRetry', JSON.stringify({
+                diff: currentDifficulty,
+                mode: '1p',
+                storyPref: storyCampaignActive ? 'story' : 'classic',
+                levelPref: storyCampaignActive ? 'castle' : 'bridge',
+                townDone: true
+            }));
+        } catch (e) {}
+        location.reload();
+        return;
+    }
     if (bridgeStageCompletePendingAdvance) {
         try {
             sessionStorage.setItem('castleRetry', JSON.stringify({
                 diff: currentDifficulty,
                 mode: '1p',
                 storyPref: 'classic',
-                levelPref: 'castle'
+                levelPref: 'castle',
+                townDone: true
             }));
         } catch (e) {}
         location.reload();
@@ -14615,7 +15512,9 @@ function retryCurrentLevel() {
             diff: currentDifficulty,
             mode: twoPlayerMode ? '2p' : '1p',
             storyPref: storyModePreference ? 'story' : 'classic',
-            levelPref: levelPreference
+            levelPref: levelPreference,
+            // Dying on the bridge/castle stage retries THAT stage, not the town.
+            townDone: townStageCleared
         }));
     } catch (e) {}
     location.reload();
@@ -16244,6 +17143,7 @@ const waterRippleLifeInputEl = document.getElementById('setWaterRippleLife');
 const waterRippleLifeValEl = document.getElementById('setWaterRippleLifeVal');
 const templateLevelInputEl = document.getElementById('setTemplateLevel');
 const bridge2LevelInputEl     = document.getElementById('setBridge2Level');
+const townLevelInputEl        = document.getElementById('setTownLevel');
 const bridgeDevLevelInputEl   = document.getElementById('setBridgeDevLevel');
 const bridgeNewLevelInputEl   = document.getElementById('setBridgeNewLevel');  // returns null (checkbox removed)
 const castleNewLevelInputEl = document.getElementById('setCastleNewLevel');  // returns null (checkbox removed)
@@ -16453,9 +17353,20 @@ setWaterFxInputsFromRuntimeState();
             if (bridgeDevLevelInputEl) bridgeDevLevelInputEl.checked = false;
             bridgeDevLevelEnabled = false;
         }
+        if (o.twn != null) {
+            if (townLevelInputEl) townLevelInputEl.checked = !!o.twn;
+            townLevelEnabled = !!o.twn;
+        } else {
+            if (townLevelInputEl) townLevelInputEl.checked = false;
+            townLevelEnabled = false;
+        }
         if (bridge2LevelEnabled && templateLevelEnabled) {
             templateLevelEnabled = false;
             if (templateLevelInputEl) templateLevelInputEl.checked = false;
+        }
+        if (townLevelEnabled && (bridge2LevelEnabled || templateLevelEnabled)) {
+            townLevelEnabled = false;
+            if (townLevelInputEl) townLevelInputEl.checked = false;
         }
         if (o.bnl != null) {
             if (bridgeNewLevelInputEl) bridgeNewLevelInputEl.checked = !!o.bnl;
@@ -16489,6 +17400,11 @@ setWaterFxInputsFromRuntimeState();
             const ciEl = document.getElementById('setCursorInspector');
             if (ciEl) ciEl.checked = !!o.ci;
             cursorInspectorEnabled = !!o.ci;
+        }
+        if (o.gtx != null) {
+            const gtxEl = document.getElementById('setGrassTexture');
+            if (gtxEl) gtxEl.checked = !!o.gtx;
+            setGrassTextureEnabled(!!o.gtx);
         }
         if (o.slw != null) { document.getElementById('setSlowMo').checked      = o.slw; slowMo      = !!o.slw; }
         if (o.snd != null) { document.getElementById('setSound').checked       = o.snd; soundEnabled = !!o.snd; }
@@ -16624,6 +17540,15 @@ document.getElementById('setPerfDebug').addEventListener('change', e => {
         localStorage.setItem('castleSettings', JSON.stringify(o));
     } catch (err) {}
 });
+// Grass texture toggle applies live and persists (no restart needed)
+document.getElementById('setGrassTexture').addEventListener('change', e => {
+    setGrassTextureEnabled(e.target.checked);
+    try {
+        const o = JSON.parse(localStorage.getItem('castleSettings') || '{}');
+        o.gtx = grassTextureEnabled;
+        localStorage.setItem('castleSettings', JSON.stringify(o));
+    } catch (err) {}
+});
 // Cursor inspector toggle applies live and persists (no restart needed)
 const cursorInspectorInputEl = document.getElementById('setCursorInspector');
 if (cursorInspectorInputEl) {
@@ -16737,10 +17662,32 @@ if (bridge2LevelInputEl) {
             templateLevelInputEl.checked = false;
             templateLevelEnabled = false;
         }
+        if (bridge2LevelEnabled && townLevelInputEl) {
+            townLevelInputEl.checked = false;
+            townLevelEnabled = false;
+        }
         try {
             const o = JSON.parse(localStorage.getItem('castleSettings') || '{}');
             o.br2 = bridge2LevelEnabled;
             o.tpl = templateLevelEnabled;
+            o.twn = townLevelEnabled;
+            localStorage.setItem('castleSettings', JSON.stringify(o));
+        } catch (err) {}
+    });
+}
+if (townLevelInputEl) {
+    townLevelInputEl.addEventListener('change', e => {
+        townLevelEnabled = e.target.checked;
+        townStageCleared = false;   // re-arming the toggle always replays the town
+        if (townLevelEnabled) {
+            if (templateLevelInputEl) { templateLevelInputEl.checked = false; templateLevelEnabled = false; }
+            if (bridge2LevelInputEl)  { bridge2LevelInputEl.checked = false;  bridge2LevelEnabled = false; }
+        }
+        try {
+            const o = JSON.parse(localStorage.getItem('castleSettings') || '{}');
+            o.twn = townLevelEnabled;
+            o.tpl = templateLevelEnabled;
+            o.br2 = bridge2LevelEnabled;
             localStorage.setItem('castleSettings', JSON.stringify(o));
         } catch (err) {}
     });
@@ -16808,6 +17755,7 @@ if (castleNewLevelInputEl) {
 document.getElementById('applySettings').addEventListener('click', () => {
     const prevTemplateLevelEnabled = templateLevelEnabled;
     const prevBridge2LevelEnabled = bridge2LevelEnabled;
+    const prevTownLevelEnabled = townLevelEnabled;
     const sg  = Math.max(0, parseInt(document.getElementById('setSg').value)  || 0);
     const cb  = Math.max(0, parseInt(document.getElementById('setCb').value)  || 0);
     const cimp = Math.min(500, Math.max(1, parseInt(document.getElementById('setCannonImpact').value) || 170));
@@ -16820,11 +17768,13 @@ document.getElementById('applySettings').addEventListener('click', () => {
     const bc  = document.getElementById('setBallCam').checked;
     const fps = document.getElementById('setFpsCounter').checked;
     const pd  = document.getElementById('setPerfDebug').checked;
+    const gtx = document.getElementById('setGrassTexture').checked;
     const wfx = document.getElementById('setWaterFx').checked;
     const dis = document.getElementById('setDisarmNpc').checked;
     const gds = document.getElementById('setDisableGuards').checked;
     const br2 = bridge2LevelInputEl ? bridge2LevelInputEl.checked : false;
     const tpl = br2 ? false : (templateLevelInputEl ? templateLevelInputEl.checked : false);
+    const twn = (br2 || tpl) ? false : (townLevelInputEl ? townLevelInputEl.checked : false);
     const slw = document.getElementById('setSlowMo').checked;
     const snd = document.getElementById('setSound').checked;
     const rub = document.getElementById('setRubbleSound').checked;
@@ -16833,6 +17783,7 @@ document.getElementById('applySettings').addEventListener('click', () => {
     ballCamAuto = bc;
     setFpsCounterEnabled(fps);
     setPerfDebugEnabled(pd);
+    setGrassTextureEnabled(gtx);
     setDevWaterFxEnabled(wfx);
     waterFxColor = wcl;
     waterFxOpacity = wop / 100;
@@ -16846,6 +17797,8 @@ document.getElementById('applySettings').addEventListener('click', () => {
     guardsDisabled = gds;
     templateLevelEnabled = tpl;
     bridge2LevelEnabled = br2;
+    townLevelEnabled = twn;
+    if (twn && !prevTownLevelEnabled) townStageCleared = false;
     slowMo      = slw;
     soundEnabled = snd;
     rubbleSoundEnabled = rub;
@@ -16853,7 +17806,7 @@ document.getElementById('applySettings').addEventListener('click', () => {
     cannonImpactScale = cimp;
     if (cannonImpactValEl) cannonImpactValEl.textContent = String(cimp);
     AMMO_START[0] = sg; AMMO_START[1] = cb; AMMO_START[2] = ex; AMMO_START[3] = mo; AMMO_START[4] = mg; AMMO_START[5] = sn;
-    localStorage.setItem('castleSettings', JSON.stringify({ sg, cb, cimp, ex, mo, mg, sn, npc, inv, bc, fps, pd, wfx, wcl, wop, wir, wrs, wrz, wrl, dis, gds, tpl, br2, slw, snd, rub }));
+    localStorage.setItem('castleSettings', JSON.stringify({ sg, cb, cimp, ex, mo, mg, sn, npc, inv, bc, fps, pd, gtx, wfx, wcl, wop, wir, wrs, wrz, wrl, dis, gds, tpl, br2, twn, slw, snd, rub }));
     p1Ammo = [...AMMO_START]; p2Ammo = [...AMMO_START];
     score = 0; bricksDestroyed = 0; shotsFired = 0;
     bestShotDamage = 0;
@@ -16882,7 +17835,8 @@ document.getElementById('applySettings').addEventListener('click', () => {
         }
     }
     applyGuardDisableMode();
-    if (templateLevelEnabled || prevTemplateLevelEnabled || bridge2LevelEnabled || prevBridge2LevelEnabled) {
+    if (templateLevelEnabled || prevTemplateLevelEnabled || bridge2LevelEnabled || prevBridge2LevelEnabled ||
+        townLevelEnabled || prevTownLevelEnabled) {
         beginStoryModeRound();
     } else if (storyModeEnabled && storyStage === 1) {
         for (const n of npcList) {
@@ -16977,12 +17931,14 @@ function updateDmLevelUi() {
 
     if (!levelHint) return;
     if (!allowManualLevel) {
-        levelHint.textContent = 'Story campaign always starts on Bridge and transitions to Castle.';
+        levelHint.textContent = 'Story campaign runs Town, then Bridge, then the Castle heist.';
         return;
     }
-    levelHint.textContent = dmLevel === 'bridge'
-        ? 'Classic starts on the standalone bridge level.'
-        : 'Classic starts on the castle siege level.';
+    levelHint.textContent = dmLevel === 'town'
+        ? 'Classic starts in the town — raid your way to The Old Crown.'
+        : dmLevel === 'bridge'
+            ? 'Classic starts on the standalone bridge level.'
+            : 'Classic starts on the castle siege level.';
 }
 
 function updateDmStoryUi() {
@@ -17003,8 +17959,8 @@ function updateDmStoryUi() {
         return;
     }
     storyHint.textContent = dmStory === 'story'
-        ? 'Story mode runs Bridge -> Castle and ends when all defenders are down.'
-        : 'Classic mode lets you choose Bridge or Castle as the starting level.';
+        ? 'Story mode runs Town -> Bridge -> Castle and ends when the heist is done.'
+        : 'Classic mode lets you choose Town, Bridge or Castle as the starting level.';
 
     updateDmLevelUi();
 }
@@ -17068,7 +18024,7 @@ document.querySelectorAll('.dmStoryBtn').forEach(btn => {
 document.querySelectorAll('.dmLevelBtn').forEach(btn => {
     btn.addEventListener('click', () => {
         if (!(dmMode === '1p' && dmStory === 'classic')) return;
-        dmLevel = btn.dataset.level === 'castle' ? 'castle' : 'bridge';
+        dmLevel = ['town', 'bridge', 'castle'].includes(btn.dataset.level) ? btn.dataset.level : 'bridge';
         updateDmLevelUi();
     });
 });
@@ -17092,6 +18048,12 @@ function startGameWithDifficulty(key) {
     bestShotDamage = 0;
     p2Score = 0; p2Bricks = 0; p2Shots = 0;
     gameOver = false; gameOverPending = false; gameOverPendingAt = 0; gameOverCalmSec = 0; _npcAggroTriggered = false; _hutChargerTriggered = false;
+    // Town-stage state: a fresh start replays the town unless the retry
+    // payload says it has already been cleared this run.
+    townStageCleared = _pendingTownDone;
+    _pendingTownDone = false;
+    townStageCompletePendingAdvance = false;
+    _townBackupTriggered = false;
     resetPlayerWaterState();
     _npcKillCount = 0; _npcWorldAnger = 0;
     playerHits = 0; updateHearts();
@@ -17099,7 +18061,7 @@ function startGameWithDifficulty(key) {
     // Multiplayer is temporarily disabled.
     setTwoPlayerMode(false);
     storyModePreference = dmMode === '1p' && dmStory === 'story';
-    levelPreference = dmLevel === 'bridge' ? 'bridge' : 'castle';
+    levelPreference = (dmLevel === 'bridge' || dmLevel === 'town') ? dmLevel : 'castle';
     updateUI(); updateP2UI();
     setWeapon(0);
     // Spawn extra courtyard knights to reach the difficulty's count.
@@ -17138,9 +18100,10 @@ try {
     const retry = JSON.parse(sessionStorage.getItem('castleRetry') || 'null');
     if (retry && DIFFICULTIES[retry.diff]) {
         sessionStorage.removeItem('castleRetry');
+        _pendingTownDone = !!retry.townDone;
         dmMode = '1p';
         dmStory = retry.storyPref === 'classic' ? 'classic' : 'story';
-        dmLevel = retry.levelPref === 'bridge' ? 'bridge' : 'castle';
+        dmLevel = (retry.levelPref === 'bridge' || retry.levelPref === 'town') ? retry.levelPref : 'castle';
         document.querySelectorAll('.dmModeBtn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.mode === dmMode);
         });
@@ -17149,9 +18112,21 @@ try {
             : 'High scores are tracked per difficulty.';
         updateDmStoryUi();
         updateDmLevelUi();
-        startGameWithDifficulty(retry.diff);
+        // Defer past module evaluation: the level starters reference consts
+        // declared further down the module, which are still in their temporal
+        // dead zone while this top-level code runs (e.g. the bridge convoy's
+        // taunt-interval constants).
+        setTimeout(() => {
+            try {
+                startGameWithDifficulty(retry.diff);
+            } catch (e) {
+                console.error('castleRetry auto-start failed:', e && (e.stack || e.message || String(e)));
+            }
+        }, 0);
     }
-} catch (e) {}
+} catch (e) {
+    console.error('castleRetry auto-start failed:', e && (e.stack || e.message || String(e)));
+}
 
 function adjustPower(delta) {
     const min = parseFloat(powerSlider.min);

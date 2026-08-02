@@ -813,11 +813,9 @@
         body.touch-ui #scoreboard .score-sub {
             display: none;
         }
+        /* The dev settings gear just gets in the way on touch screens. */
         body.touch-ui #settingsBtn {
-            top: calc(env(safe-area-inset-top, 0px) + 12px);
-            left: 50%;
-            right: auto;
-            transform: translateX(-50%);
+            display: none;
         }
         @media (max-width: 900px), (pointer: coarse) {
             #mobileWeaponHud { display: flex; }
