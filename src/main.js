@@ -2,6 +2,41 @@ import * as THREE from "three";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { Water } from "three/examples/jsm/objects/Water.js";
+import { Water as Water2 } from "three/examples/jsm/objects/Water2.js";
+import { Reflector } from "three/examples/jsm/objects/Reflector.js";
+import { Refractor } from "three/examples/jsm/objects/Refractor.js";
+
+// --- Boot diagnostics -------------------------------------------------------
+// An error thrown while this module is evaluating aborts the rest of the file
+// silently: the menu is left half-built and the difficulty cards never render,
+// with nothing on screen to say why. Mirror any uncaught error onto the page so
+// a failure is self-describing without needing DevTools open.
+function showBootError(label, detail) {
+    try {
+        let el = document.getElementById('bootErrorBanner');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'bootErrorBanner';
+            el.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;'
+                + 'background:#3a0d0d;color:#ffd7d7;font:12px/1.45 ui-monospace,monospace;'
+                + 'padding:8px 10px;white-space:pre-wrap;max-height:50vh;overflow:auto;'
+                + 'border-bottom:2px solid #ff5555';
+            (document.body || document.documentElement).appendChild(el);
+        }
+        el.textContent += `[${label}] ${detail}\n`;
+    } catch (_) { /* diagnostics must never throw */ }
+}
+if (typeof window !== 'undefined') {
+    window.addEventListener('error', (ev) => {
+        const err = ev.error;
+        showBootError('boot error',
+            `${ev.message}\n  at ${ev.filename}:${ev.lineno}:${ev.colno}\n${err && err.stack ? err.stack : ''}`);
+    });
+    window.addEventListener('unhandledrejection', (ev) => {
+        const r = ev.reason;
+        showBootError('unhandled promise', (r && r.stack) ? r.stack : String(r));
+    });
+}
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
 import { initEditor, activateEditor } from './editor.js';
@@ -685,6 +720,680 @@ let grenadeCookStart = 0;
 const GRENADE_FUSE_MS = 4800;   // full fuse duration when not cooked
 let _grenadeThrowConsumeClick = false;
 
+// === Automatic rifle viewmodel =============================================
+// A stubby carbine built from pivot groups rather than one welded mesh, because
+// the reload has to take it apart: the magazine drops out of vmRifleMagPivot,
+// a second "spare" magazine rides in on the support hand, and the charging
+// handle runs on its own slide. Everything hangs off vmRifleGroup, so the sway
+// and recoil code only ever has to move one object.
+//
+// Local axes match the other viewmodels: -Z is downrange, +Y up, +X right.
+const vmRifleGroup = new THREE.Group();
+const vmRifleBodyMat  = new THREE.MeshStandardMaterial({ color: 0x24262a, roughness: 0.52, metalness: 0.62 });
+const vmRifleSteelMat = new THREE.MeshStandardMaterial({ color: 0x6f757c, roughness: 0.26, metalness: 0.95 });
+const vmRiflePolyMat  = new THREE.MeshStandardMaterial({ color: 0x3a3d33, roughness: 0.82, metalness: 0.08 });
+const vmRifleGripMat  = new THREE.MeshStandardMaterial({ color: 0x1b1c1e, roughness: 0.88, metalness: 0.12 });
+const vmRifleSkinMat  = new THREE.MeshStandardMaterial({ color: 0xf0c080, roughness: 0.75, metalness: 0.0 });
+const vmRifleGlowMat  = new THREE.MeshStandardMaterial({
+    color: 0xff7a33, roughness: 0.4, metalness: 0.3, emissive: 0xff5a10, emissiveIntensity: 0,
+});
+{
+    // Receiver: the long spine everything else bolts onto.
+    const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.062, 0.088, 0.40), vmRifleBodyMat);
+    receiver.position.set(0, 0, -0.06);
+    vmRifleGroup.add(receiver);
+    // Flat-top rail along the receiver.
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.036, 0.016, 0.34), vmRifleSteelMat);
+    rail.position.set(0, 0.052, -0.08);
+    vmRifleGroup.add(rail);
+    // Ejection port, a shallow inset on the right side.
+    const port = new THREE.Mesh(new THREE.BoxGeometry(0.010, 0.036, 0.090), vmRifleSteelMat);
+    port.position.set(0.033, 0.012, -0.135);
+    vmRifleGroup.add(port);
+
+    // Handguard + barrel, forward of the receiver.
+    const handguard = new THREE.Mesh(new THREE.BoxGeometry(0.056, 0.062, 0.30), vmRiflePolyMat);
+    handguard.position.set(0, -0.004, -0.40);
+    vmRifleGroup.add(handguard);
+    for (let i = 0; i < 5; i++) {
+        const slot = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.010, 0.026), vmRifleBodyMat);
+        slot.position.set(0, 0.014, -0.31 - i * 0.052);
+        vmRifleGroup.add(slot);
+    }
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.0125, 0.0125, 0.20, 10), vmRifleSteelMat);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0, -0.004, -0.63);
+    vmRifleGroup.add(barrel);
+    // Birdcage flash hider.
+    const muzzle = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.019, 0.062, 10), vmRifleBodyMat);
+    muzzle.rotation.x = Math.PI / 2;
+    muzzle.position.set(0, -0.004, -0.745);
+    vmRifleGroup.add(muzzle);
+    // Muzzle heat glow: emissiveIntensity is driven by sustained fire.
+    const muzzleGlow = new THREE.Mesh(new THREE.TorusGeometry(0.019, 0.005, 6, 12), vmRifleGlowMat);
+    muzzleGlow.position.set(0, -0.004, -0.775);
+    vmRifleGroup.add(muzzleGlow);
+
+    // Iron sights: a rear aperture and a front post, so it reads as aimable.
+    const rearSight = new THREE.Mesh(new THREE.TorusGeometry(0.011, 0.0035, 5, 10), vmRifleBodyMat);
+    rearSight.position.set(0, 0.072, -0.02);
+    vmRifleGroup.add(rearSight);
+    const frontPostBase = new THREE.Mesh(new THREE.BoxGeometry(0.030, 0.014, 0.024), vmRifleBodyMat);
+    frontPostBase.position.set(0, 0.038, -0.60);
+    vmRifleGroup.add(frontPostBase);
+    const frontPost = new THREE.Mesh(new THREE.BoxGeometry(0.006, 0.034, 0.006), vmRifleBodyMat);
+    frontPost.position.set(0, 0.060, -0.60);
+    vmRifleGroup.add(frontPost);
+
+    // Pistol grip, angled back under the receiver.
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.125, 0.056), vmRifleGripMat);
+    grip.position.set(0, -0.098, 0.06);
+    grip.rotation.x = -0.28;
+    vmRifleGroup.add(grip);
+    // Trigger guard.
+    const guard = new THREE.Mesh(new THREE.TorusGeometry(0.030, 0.006, 5, 10, Math.PI), vmRifleBodyMat);
+    guard.rotation.set(Math.PI / 2, 0, Math.PI);
+    guard.position.set(0, -0.052, 0.002);
+    vmRifleGroup.add(guard);
+
+    // Collapsible stock running back toward the shoulder.
+    const buffer = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.13, 10), vmRifleBodyMat);
+    buffer.rotation.x = Math.PI / 2;
+    buffer.position.set(0, 0.004, 0.20);
+    vmRifleGroup.add(buffer);
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.054, 0.076, 0.11), vmRiflePolyMat);
+    stock.position.set(0, -0.004, 0.275);
+    vmRifleGroup.add(stock);
+    const buttPad = new THREE.Mesh(new THREE.BoxGeometry(0.058, 0.090, 0.018), vmRifleGripMat);
+    buttPad.position.set(0, -0.006, 0.338);
+    vmRifleGroup.add(buttPad);
+}
+
+// Magazine on its own pivot so the reload can drop it clear of the mag well.
+// Rest pose is the seated position; the animation drives position/rotation.
+const vmRifleMagPivot = new THREE.Group();
+const RIFLE_MAG_REST_Y = -0.115;
+const RIFLE_MAG_REST_Z = -0.075;
+{
+    const mag = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.150, 0.072), vmRiflePolyMat);
+    vmRifleMagPivot.add(mag);
+    const magFloor = new THREE.Mesh(new THREE.BoxGeometry(0.050, 0.014, 0.078), vmRifleGripMat);
+    magFloor.position.y = -0.082;
+    vmRifleMagPivot.add(magFloor);
+    // Witness ribs down the spine of the magazine.
+    for (let i = 0; i < 3; i++) {
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.006, 0.074), vmRifleBodyMat);
+        rib.position.y = 0.040 - i * 0.040;
+        vmRifleMagPivot.add(rib);
+    }
+}
+vmRifleMagPivot.position.set(0, RIFLE_MAG_REST_Y, RIFLE_MAG_REST_Z);
+vmRifleGroup.add(vmRifleMagPivot);
+
+// The magazine that falls away. Parented to the CAMERA, not the rifle, so once
+// released it keeps tumbling down through view space on its own while the
+// weapon carries on with the rest of the reload.
+const vmRifleDropMag = new THREE.Group();
+{
+    const mag = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.150, 0.072), vmRiflePolyMat);
+    vmRifleDropMag.add(mag);
+    const magFloor = new THREE.Mesh(new THREE.BoxGeometry(0.050, 0.014, 0.078), vmRifleGripMat);
+    magFloor.position.y = -0.082;
+    vmRifleDropMag.add(magFloor);
+}
+vmRifleDropMag.visible = false;
+camera.add(vmRifleDropMag);
+// Velocity of the dropped magazine, in camera space. Reset on each release.
+const _rifleDropMagVel = { x: 0, y: 0, z: 0, rx: 0, rz: 0 };
+
+// Charging handle on a slide: pulled back and released to chamber the round.
+const vmRifleChargePivot = new THREE.Group();
+const RIFLE_CHARGE_REST_Z = 0.118;
+{
+    const latch = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.020, 0.030), vmRifleSteelMat);
+    vmRifleChargePivot.add(latch);
+    const stem = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.012, 0.070), vmRifleSteelMat);
+    stem.position.z = -0.048;
+    vmRifleChargePivot.add(stem);
+}
+vmRifleChargePivot.position.set(0, 0.034, RIFLE_CHARGE_REST_Z);
+vmRifleGroup.add(vmRifleChargePivot);
+
+// Support hand. Parented to the camera rather than to the rifle so it can drop
+// out of frame to fetch a fresh magazine while the weapon stays where it is.
+const vmRifleHand = new THREE.Group();
+{
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.062, 0.115), vmRifleSkinMat);
+    vmRifleHand.add(palm);
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.030, 0.062), vmRifleSkinMat);
+    thumb.position.set(-0.040, 0.020, -0.022);
+    thumb.rotation.z = 0.5;
+    vmRifleHand.add(thumb);
+    for (let i = 0; i < 3; i++) {
+        const finger = new THREE.Mesh(new THREE.BoxGeometry(0.020, 0.024, 0.058), vmRifleSkinMat);
+        finger.position.set(0.030, 0.014 - i * 0.026, -0.030);
+        finger.rotation.x = -0.35;
+        vmRifleHand.add(finger);
+    }
+    // Sleeve cuff and forearm, so the hand does not just stop in mid-air.
+    const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.070, 0.055), vmRiflePolyMat);
+    cuff.position.z = 0.082;
+    vmRifleHand.add(cuff);
+    const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.070, 0.062, 0.24), vmRiflePolyMat);
+    forearm.position.z = 0.228;
+    vmRifleHand.add(forearm);
+}
+// The spare magazine the support hand carries up into the well during a reload.
+const vmRifleSpareMag = new THREE.Group();
+{
+    const mag = new THREE.Mesh(new THREE.BoxGeometry(0.044, 0.150, 0.072), vmRiflePolyMat);
+    vmRifleSpareMag.add(mag);
+    const magFloor = new THREE.Mesh(new THREE.BoxGeometry(0.050, 0.014, 0.078), vmRifleGripMat);
+    magFloor.position.y = -0.082;
+    vmRifleSpareMag.add(magFloor);
+}
+vmRifleSpareMag.position.set(0, 0.090, -0.050);
+vmRifleSpareMag.visible = false;
+vmRifleHand.add(vmRifleSpareMag);
+vmRifleHand.visible = false;
+camera.add(vmRifleHand);
+
+// Poses the reload animation interpolates between.
+const RIFLE_VM_REST = { x: 0.155, y: -0.175, z: -0.305, rx: 0.02, ry: -0.06, rz: 0.0 };
+// Brought down and rolled left so the magazine well faces the camera - the
+// pose a magazine change is actually performed in.
+const RIFLE_VM_RELOAD = { x: 0.105, y: -0.300, z: -0.245, rx: 0.30, ry: 0.42, rz: -0.55 };
+// Support hand at rest, wrapped around the handguard.
+const RIFLE_HAND_REST = { x: 0.075, y: -0.205, z: -0.640, rx: 0.0, ry: 0.0, rz: 0.0 };
+vmRifleGroup.position.set(RIFLE_VM_REST.x, RIFLE_VM_REST.y, RIFLE_VM_REST.z);
+vmRifleGroup.rotation.set(RIFLE_VM_REST.rx, RIFLE_VM_REST.ry, RIFLE_VM_REST.rz);
+vmRifleGroup.visible = false;
+camera.add(vmRifleGroup);
+
+// ===========================================================================
+// === Karate chop viewmodel + Modern Warfare airdrop state ==================
+// ===========================================================================
+// ORDERING NOTE (see DEV_NOTES.md section 2): every mutable binding for both
+// systems is declared HERE, next to the other viewmodels, and every function
+// that touches them lives further down the file. Function declarations hoist,
+// so call order does not matter -- but `let`/`const` do not, and esbuild
+// lowers them to `var`, which turns a temporal-dead-zone read into a silent
+// `undefined` instead of a clear error. Keeping all state above every reader
+// makes that class of bug impossible here.
+//
+// Nothing below builds airdrop geometry at module scope: the AC-130 and the
+// crates are created lazily the first time a drop is scheduled, so a level
+// that never airdrops pays nothing.
+
+// --- The chopping arm -------------------------------------------------------
+// Two hands in a karate stance: the right hand is the knife-hand that swings,
+// the left is held in guard across the chest. Both are children of the camera
+// like every other viewmodel. The arm is built as a shoulder pivot -> upper
+// arm -> elbow pivot -> forearm -> knife-hand chain so the swing can be driven
+// by two rotations rather than by moving each box.
+const vmKarateGiMat = new THREE.MeshStandardMaterial({ color: 0xe8e4d8, roughness: 0.92, metalness: 0.0 });
+const vmKarateGiShadeMat = new THREE.MeshStandardMaterial({ color: 0xcdc7b6, roughness: 0.95, metalness: 0.0 });
+const vmKarateBeltMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.85, metalness: 0.0 });
+const vmKarateGroup = new THREE.Group();
+// Shoulder pivot sits up and right of the screen centre; the whole arm hangs
+// from it, so `rotation` on this object sweeps the arm through its arc.
+const vmKarateShoulder = new THREE.Object3D();
+const vmKarateElbow = new THREE.Object3D();
+const vmKarateHand = new THREE.Object3D();
+{
+    // --- right arm: upper arm from the shoulder pivot ---
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.098, 0.098, 0.230), vmKarateGiMat);
+    upper.position.set(0, 0, -0.115);          // extends forward from the pivot
+    vmKarateShoulder.add(upper);
+    // Sleeve cuff where the gi ends and the forearm starts
+    const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.106, 0.106, 0.046), vmKarateGiShadeMat);
+    cuff.position.set(0, 0, -0.212);
+    vmKarateShoulder.add(cuff);
+
+    vmKarateElbow.position.set(0, 0, -0.228);  // elbow at the end of the upper arm
+    vmKarateShoulder.add(vmKarateElbow);
+
+    const fore = new THREE.Mesh(new THREE.BoxGeometry(0.082, 0.082, 0.200), vmHandSkinMat);
+    fore.position.set(0, 0, -0.100);
+    vmKarateElbow.add(fore);
+
+    vmKarateHand.position.set(0, 0, -0.200);
+    vmKarateElbow.add(vmKarateHand);
+
+    // Knife-hand: fingers held flat and together, thumb folded in, striking
+    // edge along -Y. Built as one slab plus finger grooves so it reads as a
+    // hand rather than a paddle without costing four separate finger meshes.
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.106, 0.118), vmHandSkinMat);
+    palm.position.set(0, -0.012, -0.052);
+    vmKarateHand.add(palm);
+    for (let i = 0; i < 3; i++) {
+        const groove = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.005, 0.076), vmHandSkinDark);
+        groove.position.set(0, 0.010 - i * 0.026, -0.076);
+        vmKarateHand.add(groove);
+    }
+    // Fingertips, slightly narrowed
+    const tips = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.098, 0.030), vmHandSkinDark);
+    tips.position.set(0, -0.014, -0.124);
+    vmKarateHand.add(tips);
+    // Thumb folded across the palm
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.030, 0.062), vmHandSkinMat);
+    thumb.position.set(0.026, 0.030, -0.048);
+    thumb.rotation.x = 0.30;
+    vmKarateHand.add(thumb);
+
+    vmKarateGroup.add(vmKarateShoulder);
+
+    // --- left hand: fist held in guard, static ---
+    const lGuard = new THREE.Group();
+    const lFore = new THREE.Mesh(new THREE.BoxGeometry(0.092, 0.092, 0.185), vmKarateGiMat);
+    lFore.position.set(0, 0, -0.090);
+    lGuard.add(lFore);
+    const lCuff = new THREE.Mesh(new THREE.BoxGeometry(0.100, 0.100, 0.040), vmKarateGiShadeMat);
+    lCuff.position.set(0, 0, -0.172);
+    lGuard.add(lCuff);
+    const lFist = new THREE.Mesh(new THREE.BoxGeometry(0.088, 0.090, 0.090), vmHandSkinMat);
+    lFist.position.set(0, 0, -0.232);
+    lGuard.add(lFist);
+    const lKnuck = new THREE.Mesh(new THREE.BoxGeometry(0.090, 0.022, 0.020), vmHandSkinDark);
+    lKnuck.position.set(0, 0.024, -0.272);
+    lGuard.add(lKnuck);
+    const lThumb = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.026, 0.052), vmHandSkinMat);
+    lThumb.position.set(0.042, -0.010, -0.244);
+    lGuard.add(lThumb);
+    // Black belt tail flicking into the bottom-left of frame, purely for flavour
+    const beltTail = new THREE.Mesh(new THREE.BoxGeometry(0.030, 0.140, 0.014), vmKarateBeltMat);
+    beltTail.position.set(-0.020, -0.150, -0.060);
+    beltTail.rotation.z = 0.22;
+    lGuard.add(beltTail);
+    lGuard.position.set(-0.36, -0.20, -0.10);
+    lGuard.rotation.set(-0.28, 0.62, 0.16);
+    vmKarateGroup.add(lGuard);
+    // Exposed so the swing can counter-rotate the guard hand.
+    vmKarateGroup.userData.leftGuard = lGuard;
+}
+// Rest pose: shoulder up and out to the right, elbow cocked, hand vertical.
+const VM_KARATE_HOME_POS = new THREE.Vector3(0.30, -0.16, -0.30);
+const VM_KARATE_HOME_ROT = new THREE.Euler(-0.10, -0.34, 0.18);
+vmKarateGroup.position.copy(VM_KARATE_HOME_POS);
+vmKarateGroup.rotation.copy(VM_KARATE_HOME_ROT);
+vmKarateGroup.visible = false;
+camera.add(vmKarateGroup);
+
+// --- Mae geri (front snap kick) viewmodel ------------------------------------
+// The leg is built hanging DOWN from a hip pivot placed below the camera, which
+// is the natural rest pose and makes the joint rotations read like a real leg:
+// with the chain along local -Y, a positive rotation.x about the hip swings the
+// limb toward -Z, i.e. forward. Knees only bend backwards, so the knee's
+// rotation.x is negative throughout.
+const vmMaeGeriGroup = new THREE.Group();
+const vmMaeGeriHip = new THREE.Object3D();
+const vmMaeGeriKnee = new THREE.Object3D();
+const vmMaeGeriAnkle = new THREE.Object3D();
+{
+    // Gi trousers over the thigh, cuff at the shin, bare foot.
+    const thigh = new THREE.Mesh(new THREE.BoxGeometry(0.150, 0.340, 0.150), vmKarateGiMat);
+    thigh.position.set(0, -0.170, 0);
+    vmMaeGeriHip.add(thigh);
+    const kneeCuff = new THREE.Mesh(new THREE.BoxGeometry(0.158, 0.070, 0.158), vmKarateGiShadeMat);
+    kneeCuff.position.set(0, -0.320, 0);
+    vmMaeGeriHip.add(kneeCuff);
+
+    vmMaeGeriKnee.position.set(0, -0.340, 0);
+    vmMaeGeriHip.add(vmMaeGeriKnee);
+
+    // Trouser cuff stops partway down the shin; below it is skin.
+    const shinCuff = new THREE.Mesh(new THREE.BoxGeometry(0.140, 0.130, 0.140), vmKarateGiMat);
+    shinCuff.position.set(0, -0.065, 0);
+    vmMaeGeriKnee.add(shinCuff);
+    const shin = new THREE.Mesh(new THREE.BoxGeometry(0.108, 0.230, 0.108), vmHandSkinMat);
+    shin.position.set(0, -0.190, 0);
+    vmMaeGeriKnee.add(shin);
+
+    vmMaeGeriAnkle.position.set(0, -0.310, 0);
+    vmMaeGeriKnee.add(vmMaeGeriAnkle);
+
+    // Foot: heel block, instep, and a raised ball of the foot -- the koshi, the
+    // part a mae geri actually strikes with. Toes are pulled back out of the way.
+    const heel = new THREE.Mesh(new THREE.BoxGeometry(0.100, 0.080, 0.090), vmHandSkinMat);
+    heel.position.set(0, -0.040, 0.028);
+    vmMaeGeriAnkle.add(heel);
+    const instep = new THREE.Mesh(new THREE.BoxGeometry(0.104, 0.062, 0.130), vmHandSkinMat);
+    instep.position.set(0, -0.052, -0.062);
+    vmMaeGeriAnkle.add(instep);
+    const ball = new THREE.Mesh(new THREE.BoxGeometry(0.108, 0.070, 0.055), vmHandSkinDark);
+    ball.position.set(0, -0.048, -0.146);
+    vmMaeGeriAnkle.add(ball);
+    const toes = new THREE.Mesh(new THREE.BoxGeometry(0.100, 0.042, 0.040), vmHandSkinMat);
+    toes.position.set(0, -0.014, -0.176);
+    toes.rotation.x = -0.55;                       // curled back, clear of the impact
+    vmMaeGeriAnkle.add(toes);
+
+    vmMaeGeriGroup.add(vmMaeGeriHip);
+
+    // Both fists up in guard while the leg works -- the frame needs to read as a
+    // fighting stance, not a disembodied leg.
+    const makeFist = (sx) => {
+        const g = new THREE.Group();
+        const fore = new THREE.Mesh(new THREE.BoxGeometry(0.090, 0.090, 0.170), vmKarateGiMat);
+        fore.position.set(0, 0, -0.085);
+        g.add(fore);
+        const cuff = new THREE.Mesh(new THREE.BoxGeometry(0.098, 0.098, 0.038), vmKarateGiShadeMat);
+        cuff.position.set(0, 0, -0.162);
+        g.add(cuff);
+        const fist = new THREE.Mesh(new THREE.BoxGeometry(0.086, 0.088, 0.088), vmHandSkinMat);
+        fist.position.set(0, 0, -0.220);
+        g.add(fist);
+        const knuck = new THREE.Mesh(new THREE.BoxGeometry(0.088, 0.021, 0.019), vmHandSkinDark);
+        knuck.position.set(0, 0.023, -0.258);
+        g.add(knuck);
+        // 0.22, not 0.42: this is measured from the hip pivot, which sits
+        // 0.20 higher than it used to. Keeping the number would have parked
+        // both fists over the crosshair at rest.
+        g.position.set(sx * 0.34, 0.22, -0.10);
+        g.rotation.set(-0.30, -sx * 0.55, sx * 0.12);
+        return g;
+    };
+    const guardL = makeFist(-1);
+    const guardR = makeFist(1);
+    vmMaeGeriGroup.add(guardL);
+    vmMaeGeriGroup.add(guardR);
+    vmMaeGeriGroup.userData.guardL = guardL;
+    vmMaeGeriGroup.userData.guardR = guardR;
+}
+// The hip sits below the eye line, but only just far enough to be out of
+// frame at rest: at full extension the leg has to end up IN the lower third,
+// not underneath it. With the pivot at -0.60 the extended knee was a whole
+// frame-height below centre and only the toes cleared the bottom edge.
+const VM_MAEGERI_HOME_POS = new THREE.Vector3(0.05, -0.40, -0.10);
+const VM_MAEGERI_HOME_ROT = new THREE.Euler(0, 0, 0);
+vmMaeGeriGroup.position.copy(VM_MAEGERI_HOME_POS);
+vmMaeGeriGroup.visible = false;
+camera.add(vmMaeGeriGroup);
+
+// --- Melee system: shared state ----------------------------------------------
+// Both strikes run on one machine. A swing is a list of phases, each easing the
+// rig from one named pose to the next, with exactly one impact frame somewhere
+// inside the strike phase.
+//
+// Profiles below are plain data plus an applyPose function per rig. They must
+// NOT key off WEAPON_IDX_* (those constants are declared further down the file
+// and esbuild lowers them to `var`, so referencing them here would silently
+// read `undefined`) -- meleeProfileFor() does the mapping instead.
+let meleeSwinging = false;
+let meleeSwingT = 0;
+let meleeCooldown = 0;
+let meleeImpactDone = false;
+let meleeActiveWeapon = -1;         // which weapon started the swing in progress
+let meleeFovOffset = 0;             // current FOV offset applied by the strike
+let meleeComboCount = 0;            // consecutive connects, resets on a miss or a pause
+let meleeComboExpiresAt = 0;
+let meleeLungeZ = 0;                // forward lunge applied to the whole viewmodel
+let meleeHitStop = 0;               // seconds of freeze-frame left on a connect
+// How much time still passes during hit-stop. Not zero: a hard zero looks like
+// a dropped frame, whereas a trickle reads as the world straining against the
+// blow. 6% is about the fighting-game convention.
+const MELEE_HITSTOP_SCALE = 0.06;
+const _meleePose = {};              // scratch for the interpolated pose
+const _spinOmega = new THREE.Vector3();   // scratch for applyRagdollSpin
+const _spinR = new THREE.Vector3();
+
+// Karate chop: a downward knife-hand. Short, fast, and the better of the two
+// against masonry -- it drives through the bottom courses of a wall.
+const MELEE_KARATE = {
+    name: 'Karate Chop',
+    group: vmKarateGroup,
+    homePos: VM_KARATE_HOME_POS,
+    homeRot: VM_KARATE_HOME_ROT,
+    cooldown: 0.10,
+    // Reach is measured from the camera at eye height, so the strike sphere is
+    // dropped below the view axis to land on torsos and on the lower courses of
+    // a wall rather than sailing over them.
+    reach: 2.35, radius: 1.55, drop: 0.35,
+    brickForce: 5200, brickDownBias: 0.22, brickRadialMix: 0.35,
+    npcTorso: 300, npcLimb: 90, npcUp: 70, npcLaunchPerCombo: 26,
+    npcSpin: 7, npcScatter: 0.18, npcSpinDamp: null,   // null = leave ragdoll damping alone
+    killScore: 40, hitLabel: 'KARATE',
+    fovWiden: 2.2, fovPunch: 5.0,
+    hitStop: 0.055, shake: 0.50, flash: 0,
+    whooshPitch: 1.0, impactPitch: 1.0,
+    poses: {
+        HOME: { sx: 0.16, sy: 0.30, sz: 0.00, ex: -0.55, hz: 0.25, gz: -0.30 },
+        COCK: { sx: -1.05, sy: 1.02, sz: 0.55, ex: -1.45, hz: 0.95, gz: -0.20 },
+        HIT:  { sx: 0.98, sy: -0.62, sz: -0.95, ex: -0.04, hz: -0.35, gz: -0.44 },
+    },
+    phases: [
+        { to: 'COCK', dur: 0.22, ease: 'out', lunge: 0.05 },
+        { to: 'HIT',  dur: 0.10, ease: 'in',  lunge: -0.14, strike: true, impactAt: 0.82 },
+        { to: 'HOME', dur: 0.36, ease: 'out', lunge: 0.0 },
+    ],
+    applyPose(p) {
+        vmKarateShoulder.rotation.set(p.sx, p.sy, p.sz);
+        vmKarateElbow.rotation.x = p.ex;
+        vmKarateHand.rotation.z = p.hz;
+        const lg = vmKarateGroup.userData.leftGuard;
+        if (lg) {
+            // The guard hand counter-rotates: the body twists into the strike.
+            lg.rotation.y = 0.62 + (p.gz + 0.30) * 1.6;
+            lg.rotation.x = -0.28 - (p.sy - 0.30) * 0.18;
+        }
+        const H = this.poses.HOME;
+        vmKarateGroup.position.set(
+            this.homePos.x + (p.gz - H.gz) * 0.22,
+            this.homePos.y - (p.sx - H.sx) * 0.055,
+            this.homePos.z + meleeLungeZ
+        );
+        vmKarateGroup.rotation.z = this.homeRot.z + (p.sz - H.sz) * 0.22;
+        vmKarateGroup.rotation.y = this.homeRot.y + (p.sy - H.sy) * 0.18;
+    },
+};
+
+// Mae geri: chamber, snap, RE-CHAMBER, set down. The re-chamber is the whole
+// character of the technique -- a kick that just drops to the floor afterwards
+// reads as a punt. Longer reach than the chop and far more launch, at the cost
+// of a minimum range and a slower cycle.
+const MELEE_MAEGERI = {
+    name: 'Mae Geri',
+    group: vmMaeGeriGroup,
+    homePos: VM_MAEGERI_HOME_POS,
+    homeRot: VM_MAEGERI_HOME_ROT,
+    cooldown: 0.16,
+    reach: 2.90, radius: 1.30, drop: 0.55,
+    // A kick is worse than a chop at cutting stone but throws it much further.
+    brickForce: 3400, brickDownBias: -0.06, brickRadialMix: 0.18,
+    npcTorso: 760, npcLimb: 150, npcUp: 250, npcLaunchPerCombo: 95,
+    // The spin is applied as ONE rigid rotation of the whole ragdoll (see
+    // applyRagdollSpin) -- 20 rad/s is a bit over three somersaults a second.
+    // Per-limb random spin was the first attempt and it looked feeble: the
+    // parts are joined by constraints, so the solver just cancels it out.
+    npcSpin: 20, npcScatter: 0.55,
+    // A kicked body keeps spinning. The stock ragdoll damping is tuned for a
+    // corpse settling, not for a man helicoptering over a wall.
+    npcSpinDamp: { angular: 0.05, linear: 0.03 },
+    killScore: 55, hitLabel: 'MAE GERI',
+    fovWiden: 3.4, fovPunch: 9.0,
+    hitStop: 0.13, shake: 1.0, flash: 90,
+    whooshPitch: 0.72, impactPitch: 0.80,
+    poses: {
+        // hx/kx/ax: hip, knee and ankle pitch. gy: guard-fist spread.
+        // The chamber is deliberately tight (knee folded to -2.15) and the snap
+        // deliberately overshoots to a hair past straight: a kick that stops at
+        // "leg extended" reads as a step, a kick that snaps THROUGH reads as a
+        // strike. The re-chamber then yanks it back just as fast.
+        // The chamber lifts the thigh a hair ABOVE horizontal so the knee
+        // breaks the bottom of the frame and the coil is visible before the
+        // leg goes. The snap then holds that thigh angle and extends only the
+        // knee, which is both what the technique actually is and what makes
+        // the foot travel in a straight line out from the screen rather than
+        // arcing along the bottom edge.
+        STANCE:  { hx: -0.10, kx: -0.30, ax:  0.00, gy: 0.00, rise: 0.00 },
+        CHAMBER: { hx:  1.62, kx: -2.15, ax: -0.35, gy: 0.30, rise: 0.100 },
+        SNAP:    { hx:  1.62, kx:  0.16, ax: -0.30, gy: 0.56, rise: 0.060 },
+    },
+    phases: [
+        { to: 'CHAMBER', dur: 0.20, ease: 'out', lunge: 0.07 },
+        { to: 'SNAP',    dur: 0.075, ease: 'in', lunge: -0.32, strike: true, impactAt: 0.86 },
+        // Hold at full stretch. Without it the extension exists for about four
+        // frames and the eye never registers the leg as extended at all -- it
+        // just sees a blur go out and come back. A SNAP-to-SNAP phase is a
+        // hold, and since it sits after the strike phase it moves nothing
+        // about when the hit lands.
+        { to: 'SNAP',    dur: 0.055, ease: 'out', lunge: -0.34 },
+        { to: 'CHAMBER', dur: 0.13, ease: 'out', lunge: -0.08 },   // the re-chamber
+        { to: 'STANCE',  dur: 0.30, ease: 'out', lunge: 0.0 },
+    ],
+    applyPose(p) {
+        vmMaeGeriHip.rotation.x = p.hx;
+        vmMaeGeriKnee.rotation.x = p.kx;
+        vmMaeGeriAnkle.rotation.x = p.ax;
+        const gl = vmMaeGeriGroup.userData.guardL;
+        const gr = vmMaeGeriGroup.userData.guardR;
+        // Fists tighten inward and lift as the body commits to the kick.
+        // The lunge already carries the fists toward the camera during the
+        // snap, and the old 0.22 rise on top of that put them right over the
+        // crosshair at full extension - exactly where the leg now needs to be
+        // seen. They still lift, just not into the way.
+        if (gl) { gl.rotation.y = 0.55 + p.gy; gl.position.y = 0.22 + p.gy * 0.12; }
+        if (gr) { gr.rotation.y = -0.55 - p.gy; gr.position.y = 0.22 + p.gy * 0.12; }
+        // `rise` is the weight shift onto the standing leg.
+        vmMaeGeriGroup.position.set(
+            this.homePos.x,
+            this.homePos.y + p.rise,
+            this.homePos.z + meleeLungeZ
+        );
+    },
+};
+
+function meleeProfileFor(w) {
+    if (w === WEAPON_IDX_KARATE) return MELEE_KARATE;
+    if (w === WEAPON_IDX_MAEGERI) return MELEE_MAEGERI;
+    return null;
+}
+
+// --- Airdrop state ----------------------------------------------------------
+// The pool is the list of weapons this level still owes the player. Crates and
+// the aircraft are world objects and are destroyed on a level change; the pool
+// is not, so progress carries from the town to the bridge to the castle.
+// Timings are chosen against the descent arithmetic below, not by feel alone.
+// From AIRDROP_PLANE_ALT the crate free-falls for AIRDROP_CHUTE_DELAY, then
+// settles to AIRDROP_FALL_SPEED, giving roughly a 7 s canopy ride. Adding the
+// 5.2 s the aircraft needs to fly from spawn to the release point, the first
+// weapon reaches the ground about 20 s into the round -- long enough that the
+// bare-handed opening is the point, short enough that it is not the whole
+// level. AIRDROP_RELEASE_LEAD is derived, not guessed: see the comment there.
+const AIRDROP_FIRST_PASS_SEC = 8;    // first AC-130 run after the round starts
+// A pass carries the WHOLE remaining pool, so this gap only applies to a
+// catch-up run: crates whose planned landing spot could not be validated, or
+// crates returned to the pool because the player changed level before
+// collecting them.
+const AIRDROP_GAP_SEC        = 22;
+const AIRDROP_PLANE_ALT      = 62;   // cruise altitude (the cloud deck starts at ~66)
+const AIRDROP_PLANE_SPEED    = 46;   // m/s ground speed
+const AIRDROP_RUN_HALF_LEN   = 240;  // metres of track either side of the drop point
+const AIRDROP_CHUTE_DELAY    = 0.85; // seconds of free fall before the canopy pops
+const AIRDROP_FALL_SPEED     = 8.5;  // m/s terminal descent under canopy
+const AIRDROP_DRIFT_FRAC     = 0.16; // fraction of the aircraft's speed the crate keeps
+const AIRDROP_DRIFT_DECAY    = 0.7;  // per-second decay of that forward drift
+const AIRDROP_RAMP_OFFSET    = 9;    // metres behind the aircraft origin the crate appears
+// How far before the target the AIRCRAFT must trigger the release. Derived,
+// not guessed. The crate keeps AIRDROP_PLANE_SPEED * AIRDROP_DRIFT_FRAC =
+// 7.36 m/s of forward speed, undamped through the free fall and then decaying
+// at AIRDROP_DRIFT_DECAY. Integrating the descent numerically gives 16.4 m of
+// downrange travel (stable to within 0.5 m from 20 fps to 144 fps, and within
+// 0.1 m across the aircraft's altitude bob). The crate appears
+// AIRDROP_RAMP_OFFSET metres BEHIND the aircraft, which eats into that drift,
+// so the trigger leads by the difference, not the sum:
+//     landing = releaseAt - RAMP_OFFSET + drift, and releaseAt = HALF_LEN - LEAD
+//     => LEAD = drift - RAMP_OFFSET = 16.4 - 9 = 7.4
+// Getting this wrong is not fatal -- the target is a random open spot near the
+// player -- but it decides whether the crate lands where the smoke says it will.
+const AIRDROP_RELEASE_LEAD   = 7.4;
+const AIRDROP_PICKUP_R       = 2.8;  // metres, horizontal, to collect a crate
+const AIRDROP_MARKER_H       = 14;   // height of the smoke column over a landed crate
+// --- stick planning ---------------------------------------------------------
+// One pass carries the whole remaining arsenal. What separates the crates is
+// the WIND, not the spacing between releases: a long stick simply walks the
+// back half of the load outside the arena. These numbers were chosen by
+// simulating the planner against faithful models of all three arenas (the town
+// is the tight one at 56 m wide). Halving AIRDROP_WIND_SPREAD or raising
+// AIRDROP_DROP_SPACING to 24 collapses town placement.
+//
+// AIRDROP_MIN_PLAYER_DIST is what stops the load landing around the player's
+// feet. Re-running that simulation showed inter-crate separation is the WRONG
+// lever for it: pushing AIRDROP_MIN_SEPARATION from 16 to 22 cost ten points
+// of town placement and did not move the distance-to-player distribution at
+// all, because crates can satisfy "16 m apart" while sitting in a ring around
+// whoever is watching. Rejecting spots near the player directly moves the
+// 10th-percentile walk from 15 m to 27 m and costs nothing.
+const AIRDROP_DROP_SPACING    = 8;    // metres of track between releases
+const AIRDROP_WIND_SPREAD     = 1.55; // radians, half-angle either side of the prevailing wind
+const AIRDROP_WIND_ATTEMPTS   = 32;   // wind samples per crate before giving up on it
+const AIRDROP_MIN_SEPARATION  = 16;   // metres between landing spots, relaxed as attempts fail
+const AIRDROP_MIN_PLAYER_DIST = 30;   // metres of walk from the player, relaxed as attempts fail
+const AIRDROP_PLAN_PASSES     = 3;    // whole-stick replans with a fresh heading
+// Crate band and smoke-column colour per weapon. Deliberately NOT
+// WEAPONS[].color: those are projectile tints and several are near-black (the
+// drone is 0x2a2a2a), which would give an additively-blended smoke column that
+// renders as nothing. These are picked to stay readable against grass, mud,
+// stone and a dusk sky.
+//
+// This is a FUNCTION rather than a lookup object on purpose. An object literal
+// with computed keys -- { [WEAPON_IDX_MINIGUN]: ... } -- would evaluate those
+// constants here at module scope, and they are declared further down the file.
+// esbuild lowers their `const` to `var`, so instead of a temporal-dead-zone
+// error every key would quietly become the string "undefined" and all five
+// entries would collapse into one. A function body is not evaluated until it
+// is called, which sidesteps the ordering entirely (DEV_NOTES.md section 2).
+function airdropTint(weaponIdx) {
+    if (weaponIdx === WEAPON_IDX_MINIGUN) return 0xffc23a;   // amber
+    if (weaponIdx === WEAPON_IDX_SNIPER)  return 0x63d0ff;   // ice blue
+    if (weaponIdx === WEAPON_IDX_DRONE)   return 0xff5ce0;   // magenta
+    if (weaponIdx === WEAPON_IDX_GRENADE) return 0x8dff5a;   // lime
+    if (weaponIdx === WEAPON_IDX_CLUSTER) return 0xff6a2b;   // orange
+    if (weaponIdx === WEAPON_IDX_RIFLE)   return 0xe4e0d2;   // bone white
+    return 0xffd27a;
+}
+
+// A crate's contents are either a weapon ({ weapon, amount }) or a medical
+// resupply ({ kind: 'heart' }). These two helpers are the only places in the
+// airdrop code that have to care which, so the aircraft, the descent model and
+// the landing logic stay entirely contents-agnostic.
+function airdropItemTint(item) {
+    if (item && item.kind === 'heart') return 0xff4d6a;      // medical red
+    return airdropTint(item ? item.weapon : -1);
+}
+function airdropItemLabel(item) {
+    if (!item) return 'Supplies';
+    if (item.kind === 'heart') return 'Field Medic';
+    return `${WEAPONS[item.weapon].name} \u00d7${item.amount}`;
+}
+let airdropActive = false;           // armed only by Modern Warfare
+let airdropPool = [];                // [{ weapon, amount }] still to be delivered
+// Seconds of ACTUAL PLAY until the next run, counted down by dt rather than
+// compared against performance.now(). animate() early-returns while paused, so
+// a wall-clock deadline set at arm time would silently expire behind the
+// "click to play" prompt and the first AC-130 would appear the instant the
+// player took control instead of eight seconds in.
+let airdropNextRunIn = 0;
+let airdropPlane = null;             // the single in-flight AC-130, or null
+const airdropCrates = [];            // live crates (falling and landed)
+let airdropHudEl = null;
+let airdropHudUntil = 0;
+let _airdropAssets = null;           // lazily built shared geometry/materials
+let _ac130Audio = null;              // the single engine-drone voice, or null
+
+// Scratch vectors and lazily built bits for the melee strike. Declared up here
+// with everything else for the ordering reason above: startGameWithDifficulty
+// can run during module evaluation (the sessionStorage "Retry" path), which
+// reaches setWeapon and armAirdropForDifficulty before the bottom of the file
+// has executed.
+const _karateFwd = new THREE.Vector3();
+const _karateHitPos = new THREE.Vector3();
+let _karateTrail = null;             // swipe ribbon, built on the first swing
+let _maeGeriTrail = null;            // kick wake, built on the first kick
+// Scratch state for predictCrateLanding(). Reused rather than reallocated: the
+// run planner flies this a few hundred times while choosing crate winds.
+const _cratePredict = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, windX: 0, windZ: 0, age: 0 };
+
 let yaw = Math.PI;  // start facing castle (+Z direction)
 let pitch = 0.2;
 const DEFAULT_PITCH_MIN = -0.15;
@@ -945,6 +1654,58 @@ const PLAYER_WATER_EDGE_BUFFER_BRIDGE = 0.90;
 const PLAYER_WATER_CONTACT_DELAY_SEC = 0.6;
 const WATER_SYSTEM_ENABLED = true;
 const CASTLE_MOAT_WATER_ENABLED = true;
+
+// === Water surface mode state ==============================================
+// These MUST be declared here, above any module-level water construction. The
+// castle moat is built at module scope further down and registers itself
+// through addWaterSurface(); if these declarations sat next to their functions
+// (they originally did) the moat would run first and push into an
+// uninitialised registry. esbuild lowers top-level const to var in the bundle,
+// so that surfaced as "Cannot read properties of undefined" rather than the
+// clearer temporal-dead-zone error. The functions themselves live further down
+// with the rest of the water code - function declarations hoist, values do not.
+const WATER_MODE_REFLECTIVE = 0;   // three.js Water - planar reflection (default)
+const WATER_MODE_RIPPLES    = 1;   // Water + live interactive ripple heightfield
+const WATER_MODE_REFRACT    = 2;   // Refractor - see through it, nothing mirrored
+const WATER_MODE_FLOW       = 3;   // Water2 - flow-mapped, reflect AND refract
+const WATER_MODE_MIRROR     = 4;   // Reflector - sharp undistorted mirror
+const WATER_MODE_COUNT      = 5;
+// Default. NOTE: applyWaterFxFromSettingsUi() reads the <select> before it
+// writes runtime state back to it, so the matching option in index.html must
+// carry `selected` or the DOM default silently wins on a fresh profile.
+let waterSurfaceMode = WATER_MODE_RIPPLES;
+
+// { geo, cfg, mesh } for every mode-switchable surface currently in the scene.
+const waterSurfaceRegistry = [];
+
+// Interactive ripple heightfield state (see initRippleSim further down).
+const RIPPLE_SIM_RES = 512;              // 512 over a 192 m square = 0.375 m / texel
+const RIPPLE_WORLD_HALF = 96;            // sim covers +/- this many metres
+// Wave speed in METRES PER SECOND, converted to the shader's coupling constant
+// below. The naive form of this solver (h = neighbourAvg*2 - prev) sits exactly
+// on the CFL limit: one texel per step, which at 0.375 m/texel and 60 steps a
+// second is ~22 m/s. Real ripples on standing water are about 1 m/s.
+let rippleWaveSpeedMps = 1.2;
+// How long a ripple lives, in seconds to half amplitude. Authored in seconds
+// rather than as a raw per-step damping coefficient: "0.996" is meaningless to
+// tune by eye, and its low end (0.96 = a quarter of a second) silently produced
+// a wobble that died before it could travel anywhere.
+let rippleLifeSec = 3.0;
+// Fixed tick rate. Stepping once per rendered frame tied wave speed to
+// framerate - ripples crawled at 30 fps and raced at 60.
+const RIPPLE_SIM_HZ = 60;
+const RIPPLE_MAX_STEPS_PER_FRAME = 3;    // bound catch-up after a hitch
+let _rippleAccum = 0;
+let _rippleSimA = null, _rippleSimB = null, _rippleNormalRT = null;
+let _rippleScene = null, _rippleCam = null, _rippleQuad = null;
+let _rippleMatStep = null, _rippleMatDrop = null, _rippleMatNormal = null;
+let _rippleReady = false;
+let _rippleWarned = false;
+const _rippleDropQueue = [];             // [{ x, z, strength, radius }]
+const RIPPLE_VERT = `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+`;
 const BRIDGE_CHANNEL_WATER_ENABLED = true;
 const SIMPLE_MURKY_WATER_OVERLAY = false;
 const DEV_SHOW_BRIDGE_WATER_PERIMETERS = false;
@@ -1009,6 +1770,17 @@ const SHOTGUN_PELLETS = 8;
 const SHOTGUN_SPREAD = 0.062;
 const SHOTGUN_STAGGER = 0.018;
 const SHOTGUN_BREAK_SPEED = 2.0;
+// Pellets are visually identical and nothing tints them per-instance, so all
+// of them share one geometry and one material. Allocating these per pellet
+// meant 8 fresh GL buffer uploads per shot (and a leak, since pellet removal
+// never disposed them) - that was the hitch on the first few blasts.
+const SHOTGUN_PELLET_GEO = new THREE.SphereGeometry(0.055, 6, 6);
+const SHOTGUN_PELLET_MAT = new THREE.MeshStandardMaterial({ color: 0xd7d0c2, metalness: 0.82, roughness: 0.24 });
+// Buckshot ragdoll fling: how much velocity a point-blank hit adds, and how
+// long the ragdoll speed clamp is lifted so the body actually clears the rail.
+const SHOTGUN_FLING_TORSO_DV = 31;   // m/s added to the torso at point blank
+const SHOTGUN_FLING_LIMB_DV  = 19;   // m/s added to every other part
+const SHOTGUN_FLING_MS = 1100;
 let sniperAiming = false;
 let sniperNextFire = 0;
 let p2SniperNextFire = 0;
@@ -1039,12 +1811,39 @@ const WEAPON_IDX_SNIPER  = 5;
 const WEAPON_IDX_DRONE   = 6;
 const WEAPON_IDX_GRENADE = 7;   // bouncing grenade launcher
 const WEAPON_IDX_CLUSTER = 8;   // cluster bomb (mid-air burst)
+const WEAPON_IDX_KARATE  = 9;   // melee knife-hand strike (Modern Warfare start weapon)
+const WEAPON_IDX_MAEGERI = 10;  // melee front snap kick
+const WEAPON_IDX_RIFLE   = 11;  // automatic rifle (Modern Warfare airdrop)
+
+// === Automatic rifle =======================================================
+// Full-auto while the trigger is held, fed from a 30-round magazine. p1Ammo
+// holds TOTAL rounds carried (magazine included) so the generic ammo plumbing
+// -- the empty-slot skip in setWeapon(), the ammo-exhaustion game over, the
+// crate pickup -- all keep working untouched. rifleMag is how many of that
+// total are actually chambered.
+const RIFLE_RATE = 92;          // ms between rounds (~650 rpm)
+const RIFLE_MAG_SIZE = 30;
+const RIFLE_RELOAD_MS = 2450;   // full magazine change, start to shoulder
+let rifleFiring = false;
+let rifleNextFire = 0;
+let rifleMag = 0;               // rounds in the magazine right now
+let rifleReloadT = 0;           // 0 = not reloading, else 0..1 through the animation
+let rifleReloadStage = -1;      // last audio stage fired, so each click plays once
+// Effective downward acceleration on a rifle round, against the world's 13.
+// A quarter of world gravity puts one metre of drop at 118 m rather than 59 m
+// at the low end of the power slider, and 169 m rather than 84 m at the top.
+const RIFLE_GRAVITY = 3.25;
+let rifleShotKick = 0;          // recoil impulse, decays per frame
+let rifleRecoilPitch = 0;       // accumulated muzzle climb, bled off between bursts
 
 function getPitchMinForWeapon(w) {
     if (window.__editorActive) return MINIGUN_PITCH_MIN;
-    if (w === WEAPON_IDX_MINIGUN || w === WEAPON_IDX_SHOTGUN) return MINIGUN_PITCH_MIN;
+    if (w === WEAPON_IDX_MINIGUN || w === WEAPON_IDX_SHOTGUN || w === WEAPON_IDX_RIFLE) return MINIGUN_PITCH_MIN;
     if (w === WEAPON_IDX_SNIPER) return SNIPER_PITCH_MIN;
     if (w === WEAPON_IDX_GRENADE || w === WEAPON_IDX_CLUSTER) return MINIGUN_PITCH_MIN;
+    // Melee has to be able to look down at a body or the base of a wall, so it
+    // gets the same wide pitch range as the hand-held weapons.
+    if (w === WEAPON_IDX_KARATE || w === WEAPON_IDX_MAEGERI) return MINIGUN_PITCH_MIN;
     return DEFAULT_PITCH_MIN;
 }
 function clampAimPitch(v) {
@@ -1064,6 +1863,12 @@ let gameOverCalmSec = 0;
 let _npcAggroTriggered = false;
 let _hutChargerTriggered = false;
 let playerHits = 0;
+// Hearts are no longer a fixed three: a medical airdrop collected at full
+// health fits an extra one, up to PLAYER_HEART_CAP. The row of heart elements
+// is rebuilt to match, so nothing in the HTML pins the count.
+const PLAYER_HEART_BASE = 3;
+const PLAYER_HEART_CAP = 5;
+let playerMaxHearts = PLAYER_HEART_BASE;
 let playerDefeatReason = '';
 let gamePaused = true;
 let _hasPlayed = false;
@@ -1270,9 +2075,15 @@ bindTapActivate(document.getElementById("lockMsg"), () => {
     unlockAndPrecacheSfx();
     if (!beginTouchControls()) renderer.domElement.requestPointerLock();
 });
+// Escape both pauses (via the browser's pointer-lock exit) and, pressed again
+// on the pause screen, drops back to the main menu. Browsers swallow the ESC
+// that releases the lock, but a held/double tap can still arrive here a frame
+// later — this guards against bouncing straight out of the level.
+let _lastPointerUnlockAt = -1e9;
 const pauseActionsEl = document.getElementById('pauseActions');
 const resumeBtn = document.getElementById('resumeBtn');
 const pauseRetryBtn = document.getElementById('pauseRetryBtn');
+const pauseMenuBtn = document.getElementById('pauseMenuBtn');
 const goRetryBtn = document.getElementById('goRetryBtn');
 const goMenuBtn  = document.getElementById('goMenuBtn');
 if (resumeBtn) {
@@ -1286,6 +2097,12 @@ if (pauseRetryBtn) {
     pauseRetryBtn.addEventListener('click', e => {
         e.stopPropagation();
         retryCurrentLevel();
+    });
+}
+if (pauseMenuBtn) {
+    pauseMenuBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        returnToMenu();
     });
 }
 if (goRetryBtn) goRetryBtn.addEventListener('click', () => retryCurrentLevel());
@@ -1305,7 +2122,9 @@ renderer.domElement.addEventListener("click", e => {
             fireDrone();
         } else if (currentWeapon === WEAPON_IDX_GRENADE || currentWeapon === WEAPON_IDX_CLUSTER) {
             // fired on mouseup � ignore click
-        } else if (currentWeapon !== WEAPON_IDX_MINIGUN) {
+        } else if (meleeProfileFor(currentWeapon)) {
+            startMeleeSwing();
+        } else if (currentWeapon !== WEAPON_IDX_MINIGUN && currentWeapon !== WEAPON_IDX_RIFLE) {
             fireCannonball(parseFloat(document.getElementById("power").value));
         }
     }
@@ -1323,6 +2142,7 @@ renderer.domElement.addEventListener('mousedown', e => {
     }
     if (e.button !== 0) return;
     if (currentWeapon === WEAPON_IDX_MINIGUN) { minigunFiring = true; minigunNextFire = 0; }
+    if (currentWeapon === WEAPON_IDX_RIFLE) { rifleFiring = true; rifleNextFire = 0; }
     if ((currentWeapon === WEAPON_IDX_GRENADE || currentWeapon === WEAPON_IDX_CLUSTER)
             && !gameOver && !gamePaused && pointerLocked && p1Ammo[currentWeapon] > 0) {
         grenadeCooking = true;
@@ -1332,7 +2152,7 @@ renderer.domElement.addEventListener('mousedown', e => {
 });
 renderer.domElement.addEventListener('mouseup', e => {
     if (e.button === 0) {
-        minigunFiring = false; droneAscend = false;
+        minigunFiring = false; rifleFiring = false; droneAscend = false;
         if (grenadeCooking) {
             grenadeCooking = false;
             vmGrenadeGroup.visible = false;
@@ -1563,6 +2383,7 @@ document.querySelectorAll('.wBtn').forEach((btn, idx) => {
 
 document.addEventListener("pointerlockchange", () => {
     pointerLocked = document.pointerLockElement === renderer.domElement;
+    if (!pointerLocked) _lastPointerUnlockAt = performance.now();
     const hasCapture = hasPrimaryPlayerInputCapture();
     // Don't reveal the lock prompt until the player has chosen a difficulty.
     document.getElementById("lockMsg").style.display =
@@ -1576,6 +2397,7 @@ document.addEventListener("pointerlockchange", () => {
     }
     if (!hasCapture) {
         minigunFiring = false;
+        rifleFiring = false;
         sniperAiming = false;
         sniperHoldBreath = false;
         resetPlayerWaterState();
@@ -1719,10 +2541,7 @@ function fireCannonballP2(power) {
                 .addScaledVector(up, pitchJitter)
                 .normalize();
 
-            const mesh = new THREE.Mesh(
-                new THREE.SphereGeometry(0.055, 6, 6),
-                new THREE.MeshStandardMaterial({ color: 0xd7d0c2, metalness: 0.82, roughness: 0.24 })
-            );
+            const mesh = new THREE.Mesh(SHOTGUN_PELLET_GEO, SHOTGUN_PELLET_MAT);
             scene.add(mesh);
 
             const body = new CANNON.Body({
@@ -2009,6 +2828,11 @@ const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -13.0, 0) });
 // and is immune to sweep-axis clustering. We keep SAP as the default for
 // stability and expose a reversible override with ?bp=grid for A/B testing.
 let _perfDbgBroadphaseMs = 0;
+// Diagnostics for "world.step is expensive but nothing is awake": how many
+// fixed substeps cannon actually ran, and how many candidate pairs the
+// broadphase handed the narrowphase.
+let _perfDbgSubsteps = 0;
+let _perfDbgPairs = 0;
 function parseBroadphaseMode() {
     try {
         const q = new URLSearchParams(window.location.search);
@@ -2135,6 +2959,7 @@ function instrumentBroadphase(bp) {
         const t0 = performance.now();
         const r = orig(w, p1, p2);
         _perfDbgBroadphaseMs += performance.now() - t0;
+        _perfDbgPairs += p1.length;
         return r;
     };
     bp.__instrumented = true;
@@ -2171,6 +2996,11 @@ world.broadphase = sapBroadphase;
 // refreshes flagged bodies lazily at query time.
 const _origWorldAddBody = world.addBody.bind(world);
 world.addBody = (body) => { body.aabbNeedsUpdate = true; _origWorldAddBody(body); };
+// Count fixed substeps actually executed per frame. world.step() runs a
+// catch-up loop internally, so a single call can be several internalSteps -
+// which is the difference between "the solver is slow" and "we ran it 4 times".
+const _origInternalStep = world.internalStep.bind(world);
+world.internalStep = (stepDt) => { _perfDbgSubsteps++; _origInternalStep(stepDt); };
 // Stiff contacts need more solver passes to converge; 20 keeps a 12-high stack
 // of heavy blocks rock-steady and � crucially � makes the left and right halves
 // of a wall settle identically instead of one side ending up pre-stressed.
@@ -3294,17 +4124,51 @@ const npcHillBlockers = [];
     // whole horizon is just 2 draw calls instead of 42 (helps draw-call-bound
     // integrated GPUs). Hills don't cast/receive shadows, so they already skip
     // the shadow pass.
+    // The ring is centred on the CASTLE, but the town stage sits about 134 m
+    // south of that centre -- far enough that the ring's southern arc landed
+    // on top of it. One hill's skirt reached 33 m inside the town and three
+    // more came within 8 m of the tree belt, so the horizon clipped through
+    // the trees instead of standing behind them. Hills that crowd the town
+    // are walked outward along their own bearing, which keeps the ring's
+    // shape and leaves the castle-side skyline -- which clears by 60 m or
+    // more already -- bit-for-bit unchanged.
+    const TOWN_KEEPOUT_X = 30;    // tree belt reaches |x| ~28
+    const TOWN_KEEPOUT_Z0 = -62;  // player spawn is at z = -52
+    const TOWN_KEEPOUT_Z1 = 34;   // tavern sits at z = 24
+    const TOWN_KEEPOUT_CLEAR = 45;// metres of open ground wanted beyond the trees
+    // Distance from a hill's SKIRT to the nearest point of the town footprint.
+    const townSkirtGap = (hx, hz, effR) => {
+        const cx = Math.min(Math.max(hx, -TOWN_KEEPOUT_X), TOWN_KEEPOUT_X);
+        const cz = Math.min(Math.max(hz, TOWN_KEEPOUT_Z0), TOWN_KEEPOUT_Z1);
+        return Math.hypot(hx - cx, hz - cz) - effR;
+    };
+
     const nearGeos = [], farGeos = [];
     // Near ring � green, partially fogged
     const N1 = 24;
     for (let i = 0; i < N1; i++) {
+        // The four rnd() draws stay in this order and happen unconditionally:
+        // the skyline is deterministic by design, and consuming them in a
+        // different order would reshuffle every hill after the first fix.
         const a = (i / N1) * Math.PI * 2 + (rnd() - 0.5) * 0.18;
-        const dist = 165 + rnd() * 55;
-        const hx = Math.sin(a) * dist, hz = CZ + Math.cos(a) * dist;
+        let dist = 165 + rnd() * 55;
         const hr = 38 + rnd() * 48;
+        const hHeight = 20 + rnd() * 34;
+        // makeHillGeo lumps the silhouette by widening x/z up to 1.20, so the
+        // skirt can stand 20% further out than the nominal radius. Clearance
+        // has to be measured against that, not against hr.
+        const effR = hr * 1.20;
+        let hx = Math.sin(a) * dist, hz = CZ + Math.cos(a) * dist;
+        for (let pass = 0; pass < 8; pass++) {
+            const gap = townSkirtGap(hx, hz, effR);
+            if (gap >= TOWN_KEEPOUT_CLEAR) break;
+            dist += (TOWN_KEEPOUT_CLEAR - gap) + 1;
+            hx = Math.sin(a) * dist;
+            hz = CZ + Math.cos(a) * dist;
+        }
         const blockR = hr * 0.94;   // slopes flatten out near the rim � allow the skirt
         npcHillBlockers.push({ x: hx, z: hz, r2: blockR * blockR });
-        nearGeos.push(makeHillGeo(hx, hz, hr, 20 + rnd() * 34, i * 13.7));
+        nearGeos.push(makeHillGeo(hx, hz, hr, hHeight, i * 13.7));
     }
     // Far ring � hazy, larger, blends into the sky
     const N2 = 18;
@@ -3975,7 +4839,68 @@ function isInStoryBridgeWaterShapeXZ(x, z, edgeBuffer = 0) {
 // level. On the drawbridge they stand on the board's top surface (which rises
 // while the bridge is still being lowered), so they walk across rather than
 // clipping through it.
+// === NPC rubble height field ==============================================
+// npcGroundY() returned flat ground everywhere, so walkers had no idea debris
+// existed. The only thing that ever raised them was the lift inside
+// resolveNpcSolidCollision, which the ground snap then immediately undid with
+// gravity - which is why knights ended up hovering over rubble piles instead
+// of climbing them.
+//
+// This is a coarse 2D max-height field over settled masonry, rebuilt on a
+// throttle so the per-walker lookup is O(1).
+const RUBBLE_CELL = 1.0;                 // metres per cell (a brick is 2 x 1 x 1)
+const RUBBLE_HALF = 128;                 // field covers +/- this many metres
+const RUBBLE_N = (RUBBLE_HALF * 2) / RUBBLE_CELL;
+const _rubbleField = new Float32Array(RUBBLE_N * RUBBLE_N);
+// A cell taller than this is a standing wall, not a scrambleable pile. Putting
+// the cap on the CELL rather than on the step size is what stops knights
+// walking up an intact 12-course curtain wall one course at a time.
+const NPC_MAX_RUBBLE_STAND_Y = 4.0;
+
+function rubbleHeightAt(x, z) {
+    const cx = Math.floor((x + RUBBLE_HALF) / RUBBLE_CELL);
+    const cz = Math.floor((z + RUBBLE_HALF) / RUBBLE_CELL);
+    if (cx < 0 || cz < 0 || cx >= RUBBLE_N || cz >= RUBBLE_N) return 0;
+    const h = _rubbleField[cz * RUBBLE_N + cx];
+    return h > NPC_MAX_RUBBLE_STAND_Y ? 0 : h;
+}
+
+function rebuildRubbleField() {
+    _rubbleField.fill(0);
+    for (const b of getFrameActiveBricks()) {
+        const body = b?.body;
+        if (!body) continue;
+        // Only settled masonry is walkable. A brick still tumbling would
+        // teleport walkers upward and drop them again a frame later.
+        if (body.mass > 0 && body.sleepState !== 2) continue;
+        if (body.aabbNeedsUpdate) body.updateAABB();
+        const aabb = body.aabb;
+        if (!aabb) continue;
+        const top = aabb.upperBound.y;
+        if (top <= 0.35) continue;       // flush with the ground: nothing to climb
+        const x0 = Math.floor((aabb.lowerBound.x + RUBBLE_HALF) / RUBBLE_CELL);
+        const x1 = Math.floor((aabb.upperBound.x + RUBBLE_HALF) / RUBBLE_CELL);
+        const z0 = Math.floor((aabb.lowerBound.z + RUBBLE_HALF) / RUBBLE_CELL);
+        const z1 = Math.floor((aabb.upperBound.z + RUBBLE_HALF) / RUBBLE_CELL);
+        for (let cz = z0; cz <= z1; cz++) {
+            if (cz < 0 || cz >= RUBBLE_N) continue;
+            const row = cz * RUBBLE_N;
+            for (let cx = x0; cx <= x1; cx++) {
+                if (cx < 0 || cx >= RUBBLE_N) continue;
+                const i = row + cx;
+                // Store the TRUE max, including over-tall bricks, so a wall's
+                // footprint reads as wall height and is rejected on lookup.
+                if (top > _rubbleField[i]) _rubbleField[i] = top;
+            }
+        }
+    }
+}
+
 function npcGroundY(x, z) {
+    // Rubble only ever raises the walkable surface. Applying it as a plain
+    // Math.max would break the drained moat, whose floor is below y=0.
+    const rubbleY = rubbleHeightAt(x, z);
+    const withRubble = (base) => (rubbleY > 0 ? Math.max(rubbleY, base) : base);
     const onBridge = Math.abs(x) < 3.0 && z > M_OZ1 && z < M_IZ1;  // 3.0 = DB_W/2
     if (onBridge) {
         // Bridge board pivots at (z = CFZ, y = DB_H/2); a point at distance L
@@ -3988,18 +4913,18 @@ function npcGroundY(x, z) {
         // surface is DB_H=0.44m, which exceeds NPC_MAX_STEP_UP and stalls walkers.
         // Blend from 0 (island floor) to the full bridge surface over 1.5m.
         const t = THREE.MathUtils.clamp(L / 1.5, 0, 1);
-        return THREE.MathUtils.lerp(0, rawY, t);
+        return withRubble(THREE.MathUtils.lerp(0, rawY, t));
     }
-    if (isInStoryBridgeTrenchXZ(x, z, 0)) return STORY_BRIDGE_TRENCH_FLOOR_Y;
+    if (isInStoryBridgeTrenchXZ(x, z, 0)) return withRubble(STORY_BRIDGE_TRENCH_FLOOR_Y);
     const castleStageActive = !storyModeEnabled || storyStage === 2 || storyStage === 3;
     if (castleStageActive && isInCastleMoatRingXZ(x, z, 0)) {
-        if (!castleMoatDrained && WATER_SYSTEM_ENABLED && CASTLE_MOAT_WATER_ENABLED) return WATER_Y;
-        return -MOAT_DEPTH + 0.15;
+        if (!castleMoatDrained && WATER_SYSTEM_ENABLED && CASTLE_MOAT_WATER_ENABLED) return withRubble(WATER_Y);
+        return withRubble(-MOAT_DEPTH + 0.15);
     }
-    if (!WATER_SYSTEM_ENABLED) return 0;
+    if (!WATER_SYSTEM_ENABLED) return rubbleY;
     const waterSurfaceY = getWaterSurfaceYAtXZ(x, z, false);
-    if (waterSurfaceY != null) return waterSurfaceY;
-    return 0;
+    if (waterSurfaceY != null) return withRubble(waterSurfaceY);
+    return rubbleY;
 }
 
 function isInMoatWaterXZ(x, z) {
@@ -4834,6 +5759,13 @@ function setDevWaterFxEnabled(enabled) {
         wm.visible = devWaterFxEnabled && !levelSuppressed && !forceHiddenByBridge2;
     }
 
+    // Town road puddles. Water costs a planar reflection pass whenever it is
+    // rendered, so the Settings water-FX toggle must be able to switch them
+    // off; townSceneMeshes handles the level-suppression side separately.
+    if (townPuddleWater) {
+        townPuddleWater.visible = devWaterFxEnabled && !townSuppressed;
+    }
+
     for (const cap of storyWaterCapMeshes) {
         if (!cap) continue;
         const role = cap.userData?.waterRole || 'bridge';
@@ -5013,7 +5945,24 @@ function getWaterRippleShoreClearanceAtXZ(x, z, role = null) {
 }
 
 function spawnWaterImpactRipple(x, z, y = WATER_Y, speed = 1.0, role = 'bridge') {
-    if (!WATER_SYSTEM_ENABLED || !devWaterFxEnabled || !waterFxImpactRipplesEnabled || !WATER_IMPACT_RIPPLES_ENABLED || !waterImpactRipples.length) return;
+    if (!WATER_SYSTEM_ENABLED || !devWaterFxEnabled) return;
+
+    // Feed the interactive heightfield FIRST and independently of everything
+    // below. The sim is the primary impact response now, so it must not be
+    // switched off by the "Impact Ripples" toggle (that governs the expanding
+    // ring decals), blocked by an empty ring pool, or lost to the
+    // shore-clearance rejections that cull rings near a bank. Bigger, faster
+    // things throw a wider, stronger disturbance. No-op outside ripple mode.
+    queueRippleDrop(
+        x, z,
+        Math.min(0.55, 0.16 + speed * 0.006),
+        // Kept well under the reach shown in Settings, or the disturbance
+        // is as wide as the distance it travels and reads as a blob.
+        0.45 + Math.min(1.0, speed * 0.018),
+    );
+
+    if (!waterFxImpactRipplesEnabled || !WATER_IMPACT_RIPPLES_ENABLED || !waterImpactRipples.length) return;
+
     const preferredRole = (role === 'bridge' || role === 'castle') ? role : null;
     const shoreClearance = getWaterRippleShoreClearanceAtXZ(x, z, preferredRole);
     const maxScaleRadius = (shoreClearance - WATER_IMPACT_RIPPLE_SHORE_PADDING_M) / WATER_IMPACT_RING_OUTER_RADIUS_SCALE;
@@ -7437,6 +8386,8 @@ let townHadGarrison = false;
 let townhouseBrickTotal = 0;
 let _townhouseHitsCached = 0;
 let townBarmanNpc = null;
+let _townEmergeArmedAt = 0;         // door sentries can't trigger before this timestamp
+let townPuddleWater = null;         // single three.js Water surface covering all road puddles
 const townSceneMeshes = [];         // static visuals (road, decor group, fences, chimney cap…)
 const townSceneBodies = [];         // static colliders (balcony, steps, bar counter)
 const townDoorPosts = [];           // door-sentry spots emitted by the house builder
@@ -7577,20 +8528,27 @@ function buildTownHouse(cx, cz, w, d, storeys, doorSide, rot, yardType, opts = {
         }
     }
 
-    // Wooden door lintel: a plank INSIDE the opening top (spans jamb to jamb,
-    // no overlap with the masonry course above).
+    // Timber door jambs (visual only, no physics body).
+    //
+    // These replace the old horizontal lintel plank. That plank sat at y=1.62
+    // and PS.h is 0.75, so it hung down to y=1.245 � well below the 2.0 m
+    // helmet line of a standing NPC � and physically sealed the doorway. Door
+    // sentries could never walk out; they just jammed in the opening.
+    //
+    // The masonry course above the opening is the lintel now: the opening culls
+    // brick courses centred at 0.5 and 1.5, so the course above starts at
+    // y=2.0 and the doorway is clear for the full 2 m.
     {
-        const [x, z] = TW(doorLX, doorLZ);
-        // Door wall runs along local z: the plank is world-Z-aligned unless the
-        // house is quarter-turned.
-        if (axisAligned) createPlank(x, 1.62, z, !swapAxes, 1.94);
-        else {
-            createPlank(x, 1.62, z, false, 1.94);
-            const pl = bricks[bricks.length - 1];
-            pl.body.quaternion.copy(qZ);
-            syncBrickVisualTransform(pl);
+        const jambGeo = new THREE.BoxGeometry(0.16, 2.0, 0.14);
+        for (const side of [-1, 1]) {
+            const [jx, jz] = TW(doorLX, doorLZ + side);
+            const jamb = new THREE.Mesh(jambGeo, townTrimMat);
+            jamb.position.set(jx, 1.0, jz);
+            jamb.rotation.y = rot;
+            jamb.castShadow = true;
+            scene.add(jamb);
+            townSceneMeshes.push(jamb);
         }
-        markTownBrick();
     }
 
     // === Roof: one rigid dynamic body driving a plank-textured group (the
@@ -7732,9 +8690,19 @@ function buildTownHouse(cx, cz, w, d, storeys, doorSide, rot, yardType, opts = {
         }
     }
 
-    // Emit the door-sentry spot (just outside the doorway, facing the street).
-    const [ddx, ddz] = TW(doorLX + doorSide * 1.6, doorLZ);
-    townDoorPosts.push({ x: ddx, z: ddz, facing: Math.atan2(doorSide * cosR, -doorSide * sinR) });
+    // Emit the door-sentry spot (just outside the doorway, facing the street),
+    // plus the two interior points a sentry uses to walk out when the player
+    // gets close: a standing spot inside the room, and the doorway gap itself.
+    // Local x is measured from the house centre, so -doorSide steps INTO the
+    // room and +doorSide steps out toward the street.
+    const [ddx, ddz]   = TW(doorLX + doorSide * 1.6,  doorLZ);
+    const [inX, inZ]   = TW(doorLX - doorSide * 1.1,  doorLZ);
+    const [gapX, gapZ] = TW(doorLX + doorSide * 0.15, doorLZ);
+    townDoorPosts.push({
+        x: ddx, z: ddz,
+        facing: Math.atan2(doorSide * cosR, -doorSide * sinR),
+        inX, inZ, gapX, gapZ,
+    });
 }
 
 // [cx, cz, w, d, storeys, doorSide, rot, yard]
@@ -7770,6 +8738,8 @@ function buildTownEncounter() {
 
     buildTownRoad();
     buildTownhouseDecor();
+    buildTownFoliage();
+    buildTownPuddles();
 
     townSuppressed = false;   // freshly built geometry is live
     updateTotalBricksUi();
@@ -7811,12 +8781,313 @@ window._townProbe.slayDefenders = () => {
     }
     updateEnemyCountUi();
 };
-window._townProbe.renderInfo = () => ({
-    calls: renderer.info.render.calls,
-    triangles: renderer.info.render.triangles,
-    fog: scene.fog ? [scene.fog.near, scene.fog.far] : null,
-    camFov: camera.fov, camFar: camera.far,
-});
+// === Render-bottleneck diagnostics =========================================
+// Everything below only ever executes when called from the dev console, long
+// after module evaluation, so it may reference any module-scope binding
+// regardless of declaration order in the bundle.
+//
+// Why not just read renderer.info: Water / Reflector / Refractor / the ripple
+// sim all call renderer.render() recursively from onBeforeRender, and
+// WebGLRenderer.render() calls info.reset() at its start whenever
+// info.autoReset is true. So a nested pass wipes the counters mid-frame and
+// the numbers you read afterwards are only the tail of the frame. Every count
+// taken here is captured with autoReset switched off around one render.
+
+function _probeActiveCam() { return window.__editorOverrideCamera || camera; }
+
+// Estimated triangles for one object (instances multiplied in).
+function _probeTris(o) {
+    const g = o.geometry;
+    if (!g) return 0;
+    const verts = g.index ? g.index.count : (g.attributes?.position?.count || 0);
+    let t = verts / 3;
+    if (o.isInstancedMesh) t *= o.count;
+    return t;
+}
+
+// Stable-ish label for a top-level scene child, so near-identical decor
+// aggregates into one row instead of 400 rows called "Mesh".
+function _probeKey(o) {
+    if (o.name) return o.name;
+    if (o.isMesh || o.isPoints || o.isLine) {
+        const m = Array.isArray(o.material) ? o.material[0] : o.material;
+        return `${o.type}|${o.geometry?.type || '-'}|${m?.type || '-'}`;
+    }
+    if (o.isLight) return `light:${o.type}`;
+    // Unnamed Group: label it by the first mesh material inside it.
+    let firstMat = '-';
+    o.traverse(c => { if (firstMat === '-' && c.isMesh) firstMat = (Array.isArray(c.material) ? c.material[0] : c.material)?.type || '-'; });
+    return `${o.type}(${o.children.length})|${firstMat}`;
+}
+
+// One render with truthful counters. Returns draw calls / triangles for the
+// WHOLE frame including the shadow pass and every nested water pass.
+function _probeCounts(shadowUpdate) {
+    const info = renderer.info;
+    const prevAuto = info.autoReset;
+    const prevNeeds = renderer.shadowMap.needsUpdate;
+    info.autoReset = false;
+    info.reset();
+    renderer.shadowMap.needsUpdate = !!shadowUpdate;
+    renderer.render(scene, _probeActiveCam());
+    const r = info.render;
+    const out = { calls: r.calls, triangles: r.triangles, lines: r.lines, points: r.points };
+    info.autoReset = prevAuto;
+    renderer.shadowMap.needsUpdate = prevNeeds;
+    return out;
+}
+
+// Timed render. cpuMs is the JS/driver submission cost (what the perf overlay's
+// `render` figure measures); gpuWaitMs is the extra time gl.finish() blocks
+// for, i.e. GPU work the CPU had not yet waited on. cpu >> gpu means we are
+// draw-call / scene-graph bound; gpu >> cpu means fill-rate or shader bound.
+function _probeTime(frames, shadowEachFrame) {
+    frames = frames || 16;
+    const gl = renderer.getContext();
+    const cam = _probeActiveCam();
+    for (let i = 0; i < 4; i++) {                       // warm up caches
+        if (shadowEachFrame) renderer.shadowMap.needsUpdate = true;
+        renderer.render(scene, cam);
+    }
+    gl.finish();
+    let cpu = 0, tot = 0, worst = 0;
+    for (let i = 0; i < frames; i++) {
+        if (shadowEachFrame) renderer.shadowMap.needsUpdate = true;
+        const t0 = performance.now();
+        renderer.render(scene, cam);
+        const t1 = performance.now();
+        gl.finish();                                    // serialise so GPU time is attributable
+        const t2 = performance.now();
+        cpu += t1 - t0; tot += t2 - t0;
+        if (t2 - t0 > worst) worst = t2 - t0;
+    }
+    const r3 = (v) => Math.round(v * 100) / 100;
+    return {
+        cpuMs: r3(cpu / frames),
+        gpuWaitMs: r3((tot - cpu) / frames),
+        totalMs: r3(tot / frames),
+        worstMs: r3(worst),
+    };
+}
+
+// Every water surface currently in the scene, from all three registries.
+function _probeWaterMeshes() {
+    const out = [];
+    const push = (m) => { if (m && m.isObject3D && out.indexOf(m) === -1) out.push(m); };
+    if (Array.isArray(waterSurfaceRegistry)) for (const e of waterSurfaceRegistry) push(e && e.mesh);
+    if (Array.isArray(bridgeLibraryWaterSurfaces)) for (const m of bridgeLibraryWaterSurfaces) push(m);
+    push(typeof townPuddleWater !== 'undefined' ? townPuddleWater : null);
+    return out;
+}
+
+window._townProbe.renderInfo = () => {
+    const gl = renderer.getContext();
+    const size = renderer.getSize(new THREE.Vector2());
+    const shadowLights = [];
+    let lightCount = 0;
+    scene.traverse(o => {
+        if (!o.isLight) return;
+        lightCount++;
+        if (o.castShadow) shadowLights.push({
+            type: o.type,
+            map: [o.shadow.mapSize.x, o.shadow.mapSize.y],
+            ortho: o.shadow.camera.isOrthographicCamera
+                ? [o.shadow.camera.left, o.shadow.camera.right, o.shadow.camera.top, o.shadow.camera.bottom,
+                   o.shadow.camera.near, o.shadow.camera.far]
+                : null,
+        });
+    });
+    // Two controlled renders: with and without the shadow-map refresh, so the
+    // cost of re-rendering the shadow map every frame is visible directly.
+    const withShadow = _probeCounts(true);
+    const cached = _probeCounts(false);
+    const waters = _probeWaterMeshes();
+    return {
+        // --- headline: what the frame actually draws -----------------------
+        calls: withShadow.calls,
+        triangles: withShadow.triangles,
+        callsShadowPass: withShadow.calls - cached.calls,
+        trianglesShadowPass: withShadow.triangles - cached.triangles,
+        callsMainOnly: cached.calls,
+        trianglesMainOnly: cached.triangles,
+        // --- resolution ----------------------------------------------------
+        cssSize: [size.x, size.y],
+        pixelRatio: renderer.getPixelRatio(),
+        pixelCap: _pixelCap, pixelMaxCap: _pixelMaxCap, devicePixelRatio: window.devicePixelRatio,
+        drawingBuffer: [gl.drawingBufferWidth, gl.drawingBufferHeight],
+        megapixels: Math.round(gl.drawingBufferWidth * gl.drawingBufferHeight / 1e4) / 100,
+        antialias: (() => { try { return gl.getContextAttributes().antialias; } catch (_) { return null; } })(),
+        webgl2: renderer.capabilities.isWebGL2,
+        maxSamples: renderer.capabilities.maxSamples,
+        // --- shadows -------------------------------------------------------
+        shadowsEnabled: renderer.shadowMap.enabled,
+        shadowType: renderer.shadowMap.type,          // 1 = PCF, 2 = PCFSoft, 0 = Basic
+        shadowAutoUpdate: renderer.shadowMap.autoUpdate,
+        shadowLights,
+        // --- scene / gpu resources -----------------------------------------
+        lights: lightCount,
+        programs: renderer.info.programs ? renderer.info.programs.length : -1,
+        geometries: renderer.info.memory.geometries,
+        textures: renderer.info.memory.textures,
+        sceneChildren: scene.children.length,
+        waterSurfaces: waters.length,
+        waterVisible: waters.filter(m => m.visible).length,
+        waterMode: (typeof waterSurfaceMode !== 'undefined' ? waterSurfaceMode : null),
+        // --- camera / fog ---------------------------------------------------
+        fog: scene.fog ? (scene.fog.isFogExp2 ? { type: 'FogExp2', density: scene.fog.density }
+                                              : { type: 'Fog', near: scene.fog.near, far: scene.fog.far }) : null,
+        camFov: camera.fov, camFar: camera.far,
+        camPos: [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)],
+        townStageActive,
+    };
+};
+
+// Scene-graph census: what is in the scene and what it would cost if nothing
+// were frustum-culled. Compare `potentialCalls` against renderInfo().calls to
+// see how much culling is actually saving.
+window._townProbe.renderAudit = (topN) => {
+    topN = topN || 22;
+    const rows = new Map();
+    let objects = 0, visibleDrawables = 0, hiddenDrawables = 0, potentialCalls = 0, potentialTris = 0;
+    const mats = new Set(), geos = new Set();
+    const walk = (o, parentVisible, acc) => {
+        objects++;
+        const vis = parentVisible && o.visible;
+        if (o.isMesh || o.isPoints || o.isLine || o.isSprite) {
+            if (vis) {
+                visibleDrawables++;
+                const t = _probeTris(o);
+                potentialTris += t; acc.tris += t;
+                const groups = (Array.isArray(o.material) && o.geometry?.groups?.length) ? o.geometry.groups.length : 1;
+                potentialCalls += groups; acc.calls += groups;
+                acc.objs++;
+                if (o.isInstancedMesh) { acc.inst++; acc.instances += o.count; }
+                if (o.castShadow) acc.casters++;
+                if (o.material) for (const m of (Array.isArray(o.material) ? o.material : [o.material])) if (m) mats.add(m.uuid);
+                if (o.geometry) geos.add(o.geometry.uuid);
+            } else { hiddenDrawables++; acc.hidden++; }
+        }
+        for (const c of o.children) walk(c, vis, acc);
+    };
+    scene.children.forEach((child, i) => {
+        const key = _probeKey(child);
+        let acc = rows.get(key);
+        if (!acc) { acc = { key, tops: 0, idx: [], objs: 0, calls: 0, tris: 0, inst: 0, instances: 0, casters: 0, hidden: 0 }; rows.set(key, acc); }
+        acc.tops++;
+        if (acc.idx.length < 6) acc.idx.push(i);
+        walk(child, true, acc);
+    });
+    const table = [...rows.values()]
+        .map(r => ({ ...r, tris: Math.round(r.tris), idx: r.idx.join(',') }))
+        .sort((a, b) => (b.calls - a.calls) || (b.tris - a.tris))
+        .slice(0, topN);
+    return {
+        totals: {
+            objects, visibleDrawables, hiddenDrawables,
+            potentialCalls, potentialTris: Math.round(potentialTris),
+            uniqueMaterials: mats.size, uniqueGeometries: geos.size,
+            sceneChildren: scene.children.length,
+        },
+        table,
+    };
+};
+
+// The experiment. Freezes the tab for roughly 10-20 s, measures a baseline and
+// then each variant, and reports the delta each one buys. Nothing is left
+// mutated: every variant restores its own state, and the whole run is wrapped
+// in a restore of the renderer/shadow state it touched.
+window._townProbe.renderAB = (frames) => {
+    frames = frames || 14;
+    const t0All = performance.now();
+    const results = [];
+    const savedPixelRatio = renderer.getPixelRatio();
+    const savedNeedsUpdate = renderer.shadowMap.needsUpdate;
+    const run = (label, note, prep, restore, shadowEachFrame) => {
+        let undo = null;
+        try {
+            undo = prep ? prep() : null;
+            const t = _probeTime(frames, shadowEachFrame !== false);
+            results.push({ variant: label, ...t, note: note || '' });
+        } catch (err) {
+            results.push({ variant: label, cpuMs: -1, gpuWaitMs: -1, totalMs: -1, worstMs: -1, note: 'FAILED: ' + err.message });
+        } finally {
+            try { if (restore) restore(undo); } catch (e) { console.warn('renderAB restore failed for', label, e); }
+        }
+    };
+
+    // 1. Baseline: exactly what the frame loop does (shadow map refreshed every frame).
+    run('baseline', 'shadow map refreshed every frame, as the game does');
+
+    // 2. Shadow map reused instead of re-rendered. Delta = cost of re-drawing
+    //    every shadow caster into the 2048^2 map, every single frame.
+    run('shadowMapCached', 'reuse last shadow map (needsUpdate stays false)', null, null, false);
+
+    // 3. No sun shadow at all. Delta from #2 = the PCFSoft fragment sampling
+    //    cost in the main pass. Forces a shader recompile; warm-up absorbs it.
+    run('sunShadowOff', 'sun.castShadow = false (recompiles materials)',
+        () => { const p = sun.castShadow; sun.castShadow = false; return p; },
+        (p) => { sun.castShadow = p; });
+
+    // 4/5. Resolution. If halving the pixel ratio (a quarter of the pixels)
+    //      barely moves the number, this is not fill-rate bound.
+    const setPr = (r) => { renderer.setPixelRatio(r); renderer.setSize(window.innerWidth, window.innerHeight); };
+    run('pixelRatio x0.5', 'quarter of the pixels',
+        () => { setPr(savedPixelRatio * 0.5); return savedPixelRatio; }, () => setPr(savedPixelRatio));
+    run('pixelRatio x0.25', 'a sixteenth of the pixels',
+        () => { setPr(savedPixelRatio * 0.25); return savedPixelRatio; }, () => setPr(savedPixelRatio));
+
+    // 6. Water off. Every Water/Reflector/Refractor re-renders the scene from
+    //    its own camera inside our render() call.
+    run('waterHidden', 'all Water/Reflector surfaces hidden',
+        () => { const w = _probeWaterMeshes().filter(m => m.visible); w.forEach(m => { m.visible = false; }); return w; },
+        (w) => { if (w) w.forEach(m => { m.visible = true; }); });
+
+    // 7. Fog off (FogExp2 is a per-fragment cost on every material).
+    run('fogOff', 'scene.fog = null (recompiles materials)',
+        () => { const f = scene.fog; scene.fog = null; return f; }, (f) => { scene.fog = f; });
+
+    // 8. Environment map off: PMREM env sampling on every standard material.
+    run('envMapOff', 'scene.environment = null (recompiles materials)',
+        () => { const e = scene.environment; scene.environment = null; return e; }, (e) => { scene.environment = e; });
+
+    // 9. Nothing but the sky: the floor cost of a frame.
+    run('everythingHidden', 'all top-level children hidden except lights',
+        () => { const h = scene.children.filter(c => c.visible && !c.isLight); h.forEach(c => { c.visible = false; }); return h; },
+        (h) => { if (h) h.forEach(c => { c.visible = true; }); });
+
+    // 10+. Per-group attribution: hide each of the heaviest groups in turn.
+    const audit = window._townProbe.renderAudit(40);
+    const groups = audit.table.slice(0, 8);
+    for (const g of groups) {
+        run('hide: ' + g.key, `${g.tops} top-level, ~${g.calls} calls, ~${g.tris} tris`,
+            () => {
+                const hidden = scene.children.filter(c => c.visible && _probeKey(c) === g.key);
+                hidden.forEach(c => { c.visible = false; });
+                return hidden;
+            },
+            (hidden) => { if (hidden) hidden.forEach(c => { c.visible = true; }); });
+    }
+
+    // Global restore, belt and braces.
+    renderer.setPixelRatio(savedPixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.needsUpdate = savedNeedsUpdate;
+
+    const base = results[0];
+    for (const r of results) {
+        if (r.totalMs < 0) { r.savedMs = 0; continue; }
+        r.savedMs = Math.round((base.totalMs - r.totalMs) * 100) / 100;
+    }
+    const out = {
+        frames,
+        elapsedSec: Math.round((performance.now() - t0All) / 100) / 10,
+        counts: _probeCounts(true),
+        audit: audit.totals,
+        results,
+    };
+    if (console.table) console.table(results);
+    return out;
+};
 
 // Medieval stone-and-mud road: static ground decoration only (no physics
 // bodies — the world ground slab already provides collision at y=0).
@@ -7859,6 +9130,291 @@ function buildTownRoad() {
     }
     scene.add(cobbleInst);
     townSceneMeshes.push(cobbleInst);
+}
+
+// === Town scenery: trees, shrubs and rain puddles ==========================
+// Visual only � no physics bodies at all. The town already carries a full
+// dynamic brick load, so scenery here is deliberately mesh-only: it costs a
+// few draw calls and nothing whatsoever in the solver. Everything goes into
+// townSceneMeshes so it hides and shows with the rest of the level.
+
+// Conservative keep-out test so scattered scenery never lands in the road, in
+// a house, on the tavern, or on top of the player spawn. Houses can be yawed,
+// so each is treated as a circle of its half-diagonal plus a margin.
+function townSpotBlocked(x, z, clearance = 0) {
+    if (Math.abs(x) < 5.9 + clearance && z > -53.5 && z < 25.5) return true;   // road corridor
+    for (const [cx, cz, w, d] of TOWN_HOUSES) {
+        const r = Math.hypot(w, d) * 0.5 + 0.8 + clearance;
+        const dx = x - cx, dz = z - cz;
+        if (dx * dx + dz * dz < r * r) return true;
+    }
+    const tz = z - 24;                                                          // the tavern
+    if (x * x + tz * tz < (9.5 + clearance) * (9.5 + clearance)) return true;
+    const sz = z - TOWN_PLAYER_START_Z;                                         // player spawn
+    if (x * x + sz * sz < (6 + clearance) * (6 + clearance)) return true;
+    return false;
+}
+
+function buildTownFoliage() {
+    const { trunk: trunkMat, leaf: leafMat } = _getEdTreeMats();
+    const [shrubMatA, shrubMatB] = _getEdShrubMats();
+    const placed = [];   // flat [x, z, radius, ...] so scenery can't grow into itself
+
+    const spaceFree = (x, z, r) => {
+        for (let i = 0; i < placed.length; i += 3) {
+            const dx = x - placed[i], dz = z - placed[i + 1];
+            const rr = r + placed[i + 2];
+            if (dx * dx + dz * dz < rr * rr) return false;
+        }
+        return true;
+    };
+
+    // These two only RECORD a placement. The meshes are built as instanced
+    // batches once the scatter is done, so ~90 pieces of scenery cost about
+    // eight draw calls instead of the ~250 that loose Groups would.
+    const trees = [];    // { x, z, yaw, s, trunkH }
+    const shrubs = [];   // { x, z, s, rotY, useA, sub }
+
+    const addTree = (x, z) => {
+        const s = 0.80 + Math.random() * 0.55;
+        trees.push({
+            x, z,
+            yaw: Math.random() * Math.PI * 2,
+            s,
+            trunkH: (1.8 + Math.random() * 0.6) * s,
+        });
+        placed.push(x, z, 1.5 * s);
+    };
+
+    const addShrub = (x, z) => {
+        const s = 0.82 + Math.random() * 0.34;
+        shrubs.push({
+            x, z, s,
+            rotY: Math.random() * Math.PI,
+            useA: Math.random() < 0.5,
+            // Optional second blob, offset from the first.
+            sub: Math.random() < 0.65 ? {
+                s2: s * 0.66,
+                ox: (Math.random() - 0.5) * 0.28,
+                oz: (Math.random() - 0.5) * 0.28 + 0.22,
+                rotY: Math.random() * Math.PI,
+            } : null,
+        });
+        placed.push(x, z, 0.7 * s);
+    };
+
+    // Tree belt framing the town, well clear of the houses.
+    for (let i = 0, tries = 0; i < 22 && tries < 600; tries++) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const x = side * (15.5 + Math.random() * 12);
+        const z = -57 + Math.random() * 76;
+        if (townSpotBlocked(x, z, 1.6) || !spaceFree(x, z, 3.2)) continue;
+        addTree(x, z); i++;
+    }
+    // A handful in the gaps between houses, close enough to the road to read.
+    for (let i = 0, tries = 0; i < 6 && tries < 400; tries++) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const x = side * (6.6 + Math.random() * 2.4);
+        const z = -50 + Math.random() * 66;
+        if (townSpotBlocked(x, z, 1.4) || !spaceFree(x, z, 3.0)) continue;
+        addTree(x, z); i++;
+    }
+    // Shrubs along the verge, tucked against the house fronts.
+    for (let i = 0, tries = 0; i < 40 && tries < 900; tries++) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const x = side * (6.05 + Math.random() * 3.4);
+        const z = -54 + Math.random() * 72;
+        if (townSpotBlocked(x, z, 0.2) || !spaceFree(x, z, 1.0)) continue;
+        addShrub(x, z); i++;
+    }
+    // Outer scatter so the tree belt doesn't read as a solid wall.
+    for (let i = 0, tries = 0; i < 26 && tries < 600; tries++) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const x = side * (12 + Math.random() * 16);
+        const z = -58 + Math.random() * 78;
+        if (townSpotBlocked(x, z, 0.6) || !spaceFree(x, z, 1.2)) continue;
+        addShrub(x, z); i++;
+    }
+
+    // --- batch the placements into instanced meshes ----------------------
+    const dummy = new THREE.Object3D();
+    const addInstanced = (geo, mat, count, fill) => {
+        if (count <= 0) return;
+        const im = new THREE.InstancedMesh(geo, mat, count);
+        im.castShadow = true;
+        for (let i = 0; i < count; i++) {
+            fill(i);
+            dummy.updateMatrix();
+            im.setMatrixAt(i, dummy.matrix);
+        }
+        im.instanceMatrix.needsUpdate = true;
+        // Instances are spread over the whole map. Without this the frustum
+        // test uses the origin-centred geometry sphere and the whole batch
+        // pops out of view as soon as the origin leaves the frustum.
+        im.computeBoundingSphere();
+        scene.add(im);
+        townSceneMeshes.push(im);
+    };
+
+    // Trunks: a unit-height cylinder scaled per tree (Y = trunk height).
+    addInstanced(new THREE.CylinderGeometry(0.13, 0.21, 1, 7), trunkMat, trees.length, i => {
+        const t = trees[i];
+        dummy.position.set(t.x, t.trunkH * 0.5, t.z);
+        dummy.rotation.set(0, t.yaw, 0);
+        dummy.scale.set(t.s, t.trunkH, t.s);
+    });
+    // Three-tier conifer canopy, same silhouette as the editor decor tree.
+    for (const [rad, h, y] of [[1.30, 2.3, 1.15], [1.00, 1.9, 2.2], [0.65, 1.5, 3.1]]) {
+        addInstanced(new THREE.ConeGeometry(rad, h, 8), leafMat, trees.length, i => {
+            const t = trees[i];
+            dummy.position.set(t.x, t.trunkH + y * t.s, t.z);
+            dummy.rotation.set(0, t.yaw, 0);
+            dummy.scale.set(t.s, t.s, t.s);
+        });
+    }
+
+    // Shrub main blobs, split by material so both greens survive batching.
+    const shrubGeo = new THREE.DodecahedronGeometry(0.44, 0);
+    for (const useA of [true, false]) {
+        const set = shrubs.filter(s => s.useA === useA);
+        addInstanced(shrubGeo, useA ? shrubMatA : shrubMatB, set.length, i => {
+            const s = set[i];
+            dummy.position.set(s.x, 0.44 * s.s * 0.78, s.z);
+            dummy.rotation.set(0, s.rotY, 0);
+            dummy.scale.set(s.s, s.s * 0.78, s.s);
+        });
+    }
+    // Secondary blobs, offset from their parent.
+    const subs = shrubs.filter(s => s.sub);
+    addInstanced(new THREE.IcosahedronGeometry(0.36, 0), shrubMatB, subs.length, i => {
+        const s = subs[i], b = s.sub;
+        dummy.position.set(s.x + b.ox, 0.3 * b.s2, s.z + b.oz);
+        dummy.rotation.set(0, b.rotY, 0);
+        dummy.scale.set(b.s2, b.s2 * 0.82, b.s2);
+    });
+}
+
+// Standing rainwater in the road ruts and hollows. Flat discs a couple of
+// centimetres above the mud slab (top y=0.08) so they never z-fight it; low
+// roughness picks up the sky and reads as wet.
+// Largest radius multiplier makePuddleShape can produce (1 + max w1 + max w2).
+// Spacing tests inflate by this so wobbled outlines can't overlap each other -
+// overlapping coplanar triangles in the merged Water mesh would z-fight.
+const PUDDLE_WOBBLE_MAX = 1.6;
+
+// Builds one irregular closed outline. Two out-of-phase sine lobes ride on the
+// radius so no pool reads as a stamped circle; `spin` turns the whole thing.
+function makePuddleShape(cx, cy, rx, rz, spin) {
+    const N = 22;
+    const w1 = 0.16 + Math.random() * 0.20, lobes1 = 2 + ((Math.random() * 2) | 0);
+    const w2 = 0.09 + Math.random() * 0.15, lobes2 = 4 + ((Math.random() * 3) | 0);
+    const ph1 = Math.random() * Math.PI * 2, ph2 = Math.random() * Math.PI * 2;
+    const cs = Math.cos(spin), sn = Math.sin(spin);
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+        const a = (i / N) * Math.PI * 2;
+        const wob = 1 + Math.sin(a * lobes1 + ph1) * w1 + Math.sin(a * lobes2 + ph2) * w2;
+        const lx = Math.cos(a) * rx * wob;
+        const lz = Math.sin(a) * rz * wob;
+        pts.push(new THREE.Vector2(cx + lx * cs - lz * sn, cy + lx * sn + lz * cs));
+    }
+    const shape = new THREE.Shape(pts);
+    shape.autoClose = true;
+    return shape;
+}
+
+function buildTownPuddles() {
+    const placed = [];
+    const shapes = [];
+    const addPuddle = (x, z, rx, rz) => {
+        // The Water mesh is rotated -90 deg about X, which maps local +y to
+        // world -z. So a pool meant for world (x, z) is built at local (x, -z).
+        shapes.push(makePuddleShape(x, -z, rx, rz, Math.random() * Math.PI));
+        placed.push(x, z, Math.max(rx, rz) * PUDDLE_WOBBLE_MAX);
+    };
+    const clear = (x, z, r) => {
+        for (let i = 0; i < placed.length; i += 3) {
+            const dx = x - placed[i], dz = z - placed[i + 1];
+            const rr = r + placed[i + 2] + 0.4;
+            if (dx * dx + dz * dz < rr * rr) return false;
+        }
+        return true;
+    };
+
+    // On the road itself, biased toward the two cart ruts at x = +/-1.7.
+    for (let i = 0, tries = 0; i < 15 && tries < 400; tries++) {
+        const inRut = Math.random() < 0.55;
+        const x = inRut
+            ? (Math.random() < 0.5 ? -1.7 : 1.7) + (Math.random() - 0.5) * 0.9
+            : (Math.random() + Math.random() - 1) * 4.4;
+        const z = -50 + Math.random() * 68;
+        const rx = 0.5 + Math.random() * 1.5;
+        const rz = rx * (0.55 + Math.random() * 0.7);
+        if (!clear(x, z, Math.max(rx, rz) * PUDDLE_WOBBLE_MAX)) continue;
+        addPuddle(x, z, rx, rz); i++;
+    }
+    // A few off the road, in the verge dips beside the houses.
+    for (let i = 0, tries = 0; i < 6 && tries < 300; tries++) {
+        const side = Math.random() < 0.5 ? -1 : 1;
+        const x = side * (6.1 + Math.random() * 2.6);
+        const z = -52 + Math.random() * 70;
+        const rx = 0.45 + Math.random() * 0.95;
+        const rz = rx * (0.6 + Math.random() * 0.6);
+        const rOut = Math.max(rx, rz) * PUDDLE_WOBBLE_MAX;
+        if (townSpotBlocked(x, z, rOut) || !clear(x, z, rOut)) continue;
+        addPuddle(x, z, rx, rz); i++;
+    }
+
+    if (!shapes.length || !WATER_SYSTEM_ENABLED) return;
+
+    // Every pool goes into ONE merged geometry driving a single Water surface.
+    // three.js Water renders a planar reflection pass per instance, so one pool
+    // per Water would have meant ~20 extra scene renders a frame.
+    const merged = mergeGeometries(shapes.map(s => new THREE.ShapeGeometry(s)), false);
+    if (!merged) return;
+
+    // ShapeGeometry UVs follow shape coordinates, which here span the whole
+    // road; remap to a planar 0..1 so the normal-map distortion stays subtle
+    // (same treatment the bridge/moat water cap uses).
+    const pos = merged.attributes?.position;
+    if (pos) {
+        merged.computeBoundingBox();
+        const bb = merged.boundingBox;
+        const minX = bb?.min?.x ?? -1, minY = bb?.min?.y ?? -1;
+        const spanX = Math.max(0.001, (bb?.max?.x ?? 1) - minX);
+        const spanY = Math.max(0.001, (bb?.max?.y ?? 1) - minY);
+        let uv = merged.attributes.uv;
+        if (!uv || uv.count !== pos.count) {
+            uv = new THREE.Float32BufferAttribute(pos.count * 2, 2);
+            merged.setAttribute('uv', uv);
+        }
+        for (let i = 0; i < pos.count; i++) {
+            uv.setXY(i, (pos.getX(i) - minX) / spanX, (pos.getY(i) - minY) / spanY);
+        }
+        uv.needsUpdate = true;
+    }
+
+    // Built through the mode registry so the dev Mode dropdown can swap the
+    // puddles between Water / ripples / Refractor / Water2 / Reflector.
+    //
+    // resMul: Water samples its reflection buffer in SCREEN space, not surface
+    // space, so a small buffer does not mean "small on screen", it means
+    // undersampled. My first pass used a flat 256 here, which was ~8x under a
+    // 1080p screen and read as a smeary reflection sliding about as the camera
+    // moved. Scale with the viewport like the big bodies, just a bit cheaper.
+    townPuddleWater = addWaterSurface(merged, {
+        x: 0,
+        y: 0.105,                      // clear of the mud slab top at 0.08
+        z: 0,
+        role: 'town',
+        bucket: townSceneMeshes,
+        visible: devWaterFxEnabled && !townSuppressed,
+        resMul: isMobileProfile ? 0.5 : 0.75,
+        waterColor: 0x3b3524,          // muddy road water, not sea blue
+        color: 0x6b6350,
+        alpha: 0.92,
+    });
+    if (townPuddleWater) townPuddleWater.renderOrder = 1;
 }
 
 // Tavern dressing: balcony (static, the lookout stands on it), swing doors,
@@ -8053,7 +9609,11 @@ function setTownSuppressed(suppressed) {
     }
 
     for (const m of townSceneMeshes) {
-        if (m) m.visible = !suppressed;
+        if (!m) continue;
+        // The puddle Water surface also answers to the water-FX toggle, so
+        // un-suppressing the town must not switch it back on behind the
+        // player's setting.
+        m.visible = !suppressed && (m !== townPuddleWater || devWaterFxEnabled);
     }
 
     if (suppressed) {
@@ -8089,13 +9649,21 @@ function spawnTownGarrison(diffKey) {
         const p = townDoorPosts[i];
         const roll = Math.random();
         const weapon = roll < 0.18 ? 'bow' : (roll < 0.45 ? 'axe' : 'sword');
-        const npc = buildNPC(p.x, p.z, 0, p.facing, weapon);
+        // Sentries wait INSIDE their house and only step out when the player
+        // comes near the doorway (see updateTownDoorEmergence). Spawning them
+        // on the street put the whole garrison in view from the road on
+        // arrival, which is why the town read as static.
+        const npc = buildNPC(p.inX, p.inZ, 0, p.facing, weapon);
         npc.isTowerGuard = false;
         npc.arrowTimer = 0;
         npc.storyRole = 'town';
         npc.walking = false;
         npc.waypoints = [];
         npc.chaseOffsetX = (Math.random() - 0.5) * 6;
+        npc.townDoorPost = p;
+        npc.townHiddenIndoors = true;
+        npc.doorPath = [{ x: p.gapX, z: p.gapZ }, { x: p.x, z: p.z }];
+        setNpcStoryDormant(npc, true);
     }
     // Tavern porch pair flanking the door (clear of the entrance steps)
     for (const dx of [-1.6, 1.6]) {
@@ -8143,13 +9711,17 @@ function beginTownStage(campaignMode) {
     spawnTownGarrison(currentDifficulty);
     for (const npc of npcList) {
         if (!npc.storyRole) npc.storyRole = 'castle';
-        setNpcStoryDormant(npc, npc.storyRole !== 'town');
+        // Door sentries stay dormant until the player triggers their doorway.
+        setNpcStoryDormant(npc, npc.storyRole !== 'town' || npc.townHiddenIndoors === true);
     }
     if (ballista) {
         ballista.storyDormant = true;
         ballista.group.visible = false;
     }
 
+    // Short grace so the house nearest the spawn doesn't burst open on frame
+    // one, before the player has their bearings or the stage banner has read.
+    _townEmergeArmedAt = performance.now() + 900;
     _townBackupTriggered = false;
     _townBackupBannerAt = 0;
     _townhouseHitsCached = 0;
@@ -8165,6 +9737,45 @@ function beginTownStage(campaignMode) {
         setStoryHud(storyCampaignActive
             ? 'Story 1/3: Town sandbox (NPCs disabled)'
             : 'Town Level: Sandbox (NPCs disabled)');
+    }
+}
+
+// Door sentries wait indoors until the player comes near their doorway, then
+// step out through the gap and onto the street before falling through to the
+// normal chase behaviour. Radius is generous enough that a house reacts while
+// the player is still short of it, rather than popping open alongside them.
+const TOWN_EMERGE_R2 = 17 * 17;
+const TOWN_EMERGE_SHOUTS = ['RAIDERS!', 'TO ARMS!', "THEY'RE IN THE STREET!", 'OUT! OUT!'];
+
+function updateTownDoorEmergence() {
+    if (!townStageActive || guardsDisabled) return;
+    if (performance.now() < _townEmergeArmedAt) return;
+    const px = camera.position.x, pz = camera.position.z;
+    for (const npc of npcList) {
+        if (npc.isRagdoll) { npc.townEmerging = false; continue; }
+        // Drop the door-frame collision bypass once the sentry has finished its
+        // door path and is standing out on the street.
+        if (npc.townEmerging && !(npc.waypoints && npc.waypoints.length)) {
+            npc.townEmerging = false;
+        }
+        if (!npc.townHiddenIndoors) continue;
+        const p = npc.townDoorPost;
+        if (!p) { npc.townHiddenIndoors = false; continue; }
+        const dx = px - p.x, dz = pz - p.z;
+        if (dx * dx + dz * dz > TOWN_EMERGE_R2) continue;
+
+        npc.townHiddenIndoors = false;
+        npc.townEmerging = true;   // bypass solid push while clearing the door
+        setNpcStoryDormant(npc, false);
+        npc.walking = true;
+        // Stagger so a row of doors doesn't fire in perfect unison.
+        npc.walkDelay = Math.random() * 0.6;
+        npc.speedMul = Math.max(1.3, npc.speedMul || 0);
+        npc.waypoints = npc.doorPath ? npc.doorPath.slice() : [];
+        npc.attackCommit = 0;
+        // tryNpcTaunt self-limits on a global gap, so a cluster of doors
+        // opening at once still only produces one shout.
+        tryNpcTaunt(npc, TOWN_EMERGE_SHOUTS[(Math.random() * TOWN_EMERGE_SHOUTS.length) | 0]);
     }
 }
 
@@ -8478,6 +10089,437 @@ function addStoryBridgeWaterPerimeterDebug() {
     }
 }
 
+// === Selectable water surface modes ========================================
+// Settings > Water Effects > Mode existed in index.html but was never wired to
+// anything (setWaterMode had zero references in this file). These are the
+// implementations it now switches between. Every surface built through
+// createWaterSurface() is recorded so the dropdown can rebuild them in place.
+// --- Interactive ripple heightfield ----------------------------------------
+// Ping-pong wave-equation solver on a small render target: the classic "WebGL
+// water" technique. Height lives in .r and the previous height in .g, so each
+// step is (neighbour average) - previous, damped. Drops are injected at world
+// positions and spread, reflect off the border and decay.
+//
+// The field is world-anchored over one fixed square, so every water surface
+// samples it through the same mapping and ripples line up across surfaces.
+// State for all of this is declared up near WATER_SYSTEM_ENABLED, because the
+// castle moat builds itself at module scope before this point in the file.
+// Convert a wave speed in metres/second into the solver's coupling constant.
+// c = cells travelled per step; c^2 is what the shader wants. Clamped to the
+// 2D CFL limit (~0.7) so a silly slider value can't make the sim explode.
+function rippleWaveC2() {
+    const metresPerTexel = (RIPPLE_WORLD_HALF * 2) / RIPPLE_SIM_RES;
+    const c = rippleWaveSpeedMps / (metresPerTexel * RIPPLE_SIM_HZ);
+    return Math.min(0.49, c * c);
+}
+
+// Per-step amplitude retention derived from the authored lifetime.
+function rippleDampingFromLife() {
+    const steps = Math.max(1, rippleLifeSec * RIPPLE_SIM_HZ);
+    return Math.pow(0.5, 1 / steps);
+}
+
+// How far a ripple gets before it halves in amplitude. Speed and life together
+// decide whether you see a travelling ring or a blob wobbling on the spot, and
+// neither slider tells you that on its own - so it is shown in the UI.
+function rippleReachMetres() {
+    return rippleWaveSpeedMps * rippleLifeSec;
+}
+
+// Drop sizes are authored in metres and converted to the sim's UV space, so
+// changing the field's resolution or extent doesn't silently resize them.
+function rippleRadiusUv(metres) {
+    return Math.max(1.5 / RIPPLE_SIM_RES, metres / (RIPPLE_WORLD_HALF * 2));
+}
+
+function initRippleSim() {
+    if (_rippleReady || !renderer) return _rippleReady;
+    try {
+        const base = {
+            format: THREE.RGBAFormat,
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            depthBuffer: false,
+            stencilBuffer: false,
+        };
+        // Half-float so the height field can carry negative troughs.
+        _rippleSimA = new THREE.WebGLRenderTarget(RIPPLE_SIM_RES, RIPPLE_SIM_RES, { ...base, type: THREE.HalfFloatType });
+        _rippleSimB = new THREE.WebGLRenderTarget(RIPPLE_SIM_RES, RIPPLE_SIM_RES, { ...base, type: THREE.HalfFloatType });
+        _rippleNormalRT = new THREE.WebGLRenderTarget(RIPPLE_SIM_RES, RIPPLE_SIM_RES, { ...base, type: THREE.UnsignedByteType });
+
+        _rippleCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        _rippleScene = new THREE.Scene();
+
+        _rippleMatStep = new THREE.ShaderMaterial({
+            uniforms: {
+                tPrev: { value: null },
+                texel: { value: 1 / RIPPLE_SIM_RES },
+                damping: { value: rippleDampingFromLife() },
+                c2: { value: rippleWaveC2() },
+            },
+            vertexShader: RIPPLE_VERT,
+            fragmentShader: `
+                uniform sampler2D tPrev;
+                uniform float texel;
+                uniform float damping;
+                uniform float c2;
+                varying vec2 vUv;
+                void main() {
+                    vec4 c = texture2D(tPrev, vUv);
+                    float hCur  = c.r;
+                    float hPrev = c.g;
+                    float n = texture2D(tPrev, vUv + vec2(0.0,  texel)).r
+                            + texture2D(tPrev, vUv + vec2(0.0, -texel)).r
+                            + texture2D(tPrev, vUv + vec2( texel, 0.0)).r
+                            + texture2D(tPrev, vUv + vec2(-texel, 0.0)).r;
+                    // General damped wave equation. c2 = (wave speed in cells
+                    // per step)^2; c2 = 0.5 is the old hard-coded CFL-limit
+                    // behaviour, i.e. one texel per step.
+                    float h = (2.0 * hCur - hPrev + c2 * (n - 4.0 * hCur)) * damping;
+                    // Kill the outer band so waves die at the edge of the sim
+                    // square instead of wrapping back in.
+                    float e = step(texel * 3.0, vUv.x) * step(texel * 3.0, vUv.y)
+                            * step(vUv.x, 1.0 - texel * 3.0) * step(vUv.y, 1.0 - texel * 3.0);
+                    gl_FragColor = vec4(h * e, c.r, 0.0, 1.0);
+                }
+            `,
+        });
+
+        _rippleMatDrop = new THREE.ShaderMaterial({
+            uniforms: {
+                tPrev: { value: null },
+                center: { value: new THREE.Vector2(0.5, 0.5) },
+                radius: { value: 0.02 },
+                strength: { value: 0.3 },
+            },
+            vertexShader: RIPPLE_VERT,
+            fragmentShader: `
+                uniform sampler2D tPrev;
+                uniform vec2 center;
+                uniform float radius;
+                uniform float strength;
+                varying vec2 vUv;
+                void main() {
+                    vec4 c = texture2D(tPrev, vUv);
+                    float d = distance(vUv, center) / max(radius, 1e-5);
+                    float drop = max(0.0, 1.0 - d);
+                    drop = 0.5 - cos(drop * 3.14159265) * 0.5;
+                    gl_FragColor = vec4(c.r + drop * strength, c.g, c.b, 1.0);
+                }
+            `,
+        });
+
+        _rippleMatNormal = new THREE.ShaderMaterial({
+            uniforms: { tHeight: { value: null }, texel: { value: 1 / RIPPLE_SIM_RES }, nScale: { value: 5.0 } },
+            vertexShader: RIPPLE_VERT,
+            fragmentShader: `
+                uniform sampler2D tHeight;
+                uniform float texel;
+                uniform float nScale;
+                varying vec2 vUv;
+                void main() {
+                    float hL = texture2D(tHeight, vUv - vec2(texel, 0.0)).r;
+                    float hR = texture2D(tHeight, vUv + vec2(texel, 0.0)).r;
+                    float hD = texture2D(tHeight, vUv - vec2(0.0, texel)).r;
+                    float hU = texture2D(tHeight, vUv + vec2(0.0, texel)).r;
+                    // Blue channel carries "up": three's Water swizzles the
+                    // sampled noise as .xzy, so up must live in b.
+                    vec3 n = normalize(vec3((hL - hR) * nScale, (hD - hU) * nScale, 1.0));
+                    gl_FragColor = vec4(n * 0.5 + 0.5, 1.0);
+                }
+            `,
+        });
+
+        _rippleQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _rippleMatStep);
+        _rippleQuad.frustumCulled = false;
+        _rippleScene.add(_rippleQuad);
+        _rippleReady = true;
+    } catch (err) {
+        console.warn('Ripple sim init failed; ripple mode will fall back to static normals.', err);
+        _rippleReady = false;
+    }
+    return _rippleReady;
+}
+
+// World XZ -> sim UV. Returns null when the point is outside the sim square.
+function rippleWorldToUv(x, z) {
+    const u = (x + RIPPLE_WORLD_HALF) / (RIPPLE_WORLD_HALF * 2);
+    const v = (z + RIPPLE_WORLD_HALF) / (RIPPLE_WORLD_HALF * 2);
+    if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+    return [u, v];
+}
+
+// radiusMetres is a world size; it is converted to sim UV here so the caller
+// never has to know the field's resolution or extent.
+function queueRippleDrop(x, z, strength = 0.28, radiusMetres = 1.2) {
+    if (waterSurfaceMode !== WATER_MODE_RIPPLES) return;
+    if (_rippleDropQueue.length > 24) return;      // bound worst-case passes
+    _rippleDropQueue.push({ x, z, strength, radius: rippleRadiusUv(radiusMetres) });
+}
+
+// The heightfield is driven purely by things ENTERING the water - cannonballs,
+// falling masonry, ragdolls, the player - all of which already funnel through
+// spawnWaterImpactRipple(). An earlier version also disturbed the surface
+// wherever the aim swept across it; that was removed deliberately, because
+// water reacting to a camera pan reads as wrong once impacts are doing the
+// work. If you ever want it back, project the camera ray onto the surface
+// plane and call queueRippleDrop() at the intersection.
+
+function stepRippleSim(dt = 1 / 60) {
+    if (waterSurfaceMode !== WATER_MODE_RIPPLES) return;
+    if (!_rippleReady && !initRippleSim()) return;
+
+    // Fixed timestep. Stepping once per rendered frame made wave speed a
+    // function of framerate; now a second of wall clock is always a second of
+    // simulation, capped so a hitch can't trigger a catch-up storm.
+    _rippleAccum += Math.min(dt, 0.25);
+    const stepDt = 1 / RIPPLE_SIM_HZ;
+    let steps = Math.floor(_rippleAccum / stepDt);
+    if (steps <= 0 && !_rippleDropQueue.length) return;
+    _rippleAccum -= steps * stepDt;
+    steps = Math.min(steps, RIPPLE_MAX_STEPS_PER_FRAME);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+
+    // 1) Inject any queued drops into the current height buffer.
+    while (_rippleDropQueue.length) {
+        const d = _rippleDropQueue.pop();
+        const uv = rippleWorldToUv(d.x, d.z);
+        if (!uv) continue;
+        _rippleQuad.material = _rippleMatDrop;
+        _rippleMatDrop.uniforms.tPrev.value = _rippleSimA.texture;
+        _rippleMatDrop.uniforms.center.value.set(uv[0], uv[1]);
+        _rippleMatDrop.uniforms.radius.value = d.radius;
+        _rippleMatDrop.uniforms.strength.value = d.strength;
+        renderer.setRenderTarget(_rippleSimB);
+        renderer.render(_rippleScene, _rippleCam);
+        const swap = _rippleSimA; _rippleSimA = _rippleSimB; _rippleSimB = swap;
+    }
+
+    // 2) Advance the wave equation by however many fixed steps are owed.
+    _rippleQuad.material = _rippleMatStep;
+    _rippleMatStep.uniforms.damping.value = rippleDampingFromLife();
+    _rippleMatStep.uniforms.c2.value = rippleWaveC2();
+    for (let s = 0; s < steps; s++) {
+        _rippleMatStep.uniforms.tPrev.value = _rippleSimA.texture;
+        renderer.setRenderTarget(_rippleSimB);
+        renderer.render(_rippleScene, _rippleCam);
+        const sw = _rippleSimA; _rippleSimA = _rippleSimB; _rippleSimB = sw;
+    }
+
+    // 3) Differentiate the height field into a tangent-space normal map.
+    _rippleQuad.material = _rippleMatNormal;
+    _rippleMatNormal.uniforms.tHeight.value = _rippleSimA.texture;
+    renderer.setRenderTarget(_rippleNormalRT);
+    renderer.render(_rippleScene, _rippleCam);
+
+    renderer.setRenderTarget(prevTarget);
+    renderer.autoClear = prevAutoClear;
+}
+
+// Swap three's four-tap scrolling getNoise for a single lookup into the live
+// ripple normal map. Without this the simulated ripples are blended with three
+// time-offset copies of themselves and turn to mush.
+function patchWaterForRipples(water) {
+    const mat = water?.material;
+    if (!mat || !_rippleNormalRT) return false;
+    const src = mat.fragmentShader;
+    const re = /vec4 getNoise\([^)]*\)\s*\{[\s\S]*?return noise \* 0\.5 - 1\.0;\s*\}/;
+    if (!re.test(src)) {
+        if (!_rippleWarned) {
+            console.warn('Water shader getNoise not found - ripple mode falls back to static normals.');
+            _rippleWarned = true;
+        }
+        return false;
+    }
+    mat.uniforms.rippleMap = { value: _rippleNormalRT.texture };
+    mat.uniforms.rippleOrigin = { value: new THREE.Vector2(-RIPPLE_WORLD_HALF, -RIPPLE_WORLD_HALF) };
+    mat.uniforms.rippleInvSpan = { value: 1 / (RIPPLE_WORLD_HALF * 2) };
+    mat.fragmentShader = src
+        .replace('uniform sampler2D normalSampler;',
+            'uniform sampler2D normalSampler;\nuniform sampler2D rippleMap;\nuniform vec2 rippleOrigin;\nuniform float rippleInvSpan;')
+        .replace(re, `
+            vec4 getNoise( vec2 uv ) {
+                vec2 ruv = (uv - rippleOrigin) * rippleInvSpan;
+                if (ruv.x < 0.0 || ruv.x > 1.0 || ruv.y < 0.0 || ruv.y > 1.0) {
+                    return vec4(0.0, 0.0, 1.0, 1.0);
+                }
+                return texture2D(rippleMap, ruv) * 2.0 - 1.0;
+            }
+        `);
+    // size scales worldPosition.xz before getNoise sees it; 1.0 makes uv equal
+    // world metres, which is what rippleWorldToUv assumes.
+    if (mat.uniforms.size) mat.uniforms.size.value = 1.0;
+    mat.needsUpdate = true;
+    return true;
+}
+
+// Builds the surface object for the current mode. cfg carries everything the
+// modes might need so a rebuild can reproduce any of them from the registry.
+function createWaterSurface(geo, cfg) {
+    const pixelRatio = renderer?.getPixelRatio ? renderer.getPixelRatio() : 1;
+    const resScale = WATER_PLANAR_REFLECTION_RESOLUTION_SCALE * (cfg.resMul ?? 1);
+    const texW = Math.max(256, Math.floor(window.innerWidth * pixelRatio * resScale));
+    const texH = Math.max(256, Math.floor(window.innerHeight * pixelRatio * resScale));
+    const normals = waterNormalA || makeWaterNormalMap();
+    if (normals) { normals.wrapS = THREE.RepeatWrapping; normals.wrapT = THREE.RepeatWrapping; }
+    const sd = sunDir.lengthSq() > 1e-6
+        ? sunDir.clone().normalize()
+        : new THREE.Vector3(0.3, 0.9, 0.2).normalize();
+
+    let mesh = null;
+    switch (waterSurfaceMode) {
+        case WATER_MODE_MIRROR:
+            mesh = new Reflector(geo, {
+                textureWidth: texW, textureHeight: texH,
+                color: cfg.color ?? 0x8f9aa3,
+            });
+            break;
+        case WATER_MODE_REFRACT:
+            // NOTE: three's Refractor is a clean see-through pass - its shader
+            // only has color / tDiffuse / textureMatrix, with no dudv or normal
+            // input, so there is no surface distortion at all. That makes this
+            // a flat tinted window rather than water. Kept because it is a
+            // genuinely useful reference: it shows the refraction pass on its
+            // own, and unlike a mirror it cannot visually detach from the
+            // scene. Adding wave distortion means patching its fragment shader
+            // to offset vUv by a normal map, same trick as the ripple mode.
+            mesh = new Refractor(geo, {
+                textureWidth: texW, textureHeight: texH,
+                color: cfg.color ?? 0x9aa79b,
+            });
+            break;
+        case WATER_MODE_FLOW:
+            // Water2 defaults to loading textures/water/*.jpg off disk, which we
+            // do not ship - pass the procedural normal maps explicitly or it
+            // 404s and renders untextured.
+            mesh = new Water2(geo, {
+                color: cfg.color ?? 0xb5c4c9,
+                scale: 2.2,
+                flowDirection: new THREE.Vector2(1, 0.35),
+                flowSpeed: 0.035,
+                reflectivity: 0.14,
+                textureWidth: Math.min(512, texW),
+                textureHeight: Math.min(512, texH),
+                normalMap0: normals,
+                normalMap1: makeWaterNormalMap(),
+            });
+            break;
+        case WATER_MODE_RIPPLES:
+        case WATER_MODE_REFLECTIVE:
+        default:
+            mesh = new Water(geo, {
+                textureWidth: texW, textureHeight: texH,
+                waterNormals: normals,
+                sunDirection: sd,
+                sunColor: 0xffffff,
+                waterColor: cfg.waterColor ?? 0x3b3524,
+                distortionScale: cfg.distortionScale ?? (isMobileProfile ? 0.22 : 0.30),
+                fog: !!scene.fog,
+                alpha: cfg.alpha ?? 0.9,
+            });
+            if (waterSurfaceMode === WATER_MODE_RIPPLES) {
+                initRippleSim();
+                patchWaterForRipples(mesh);
+            } else if (mesh.material?.uniforms?.size) {
+                mesh.material.uniforms.size.value = WATER_LIBRARY_WAVE_SIZE;
+            }
+            break;
+    }
+
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(cfg.x ?? 0, cfg.y ?? 0, cfg.z ?? 0);
+    mesh.receiveShadow = false;
+    mesh.frustumCulled = false;
+    if (mesh.material) mesh.material.side = THREE.DoubleSide;
+    mesh.userData = mesh.userData || {};
+    mesh.userData.waterRole = cfg.role || 'castle';
+    mesh.userData.waterModeMesh = true;
+    mesh.name = `waterSurface-${cfg.role || 'castle'}-m${waterSurfaceMode}`;
+    return mesh;
+}
+
+// Register + add. Returns the mesh so callers keep their existing shape.
+function addWaterSurface(geo, cfg) {
+    let mesh;
+    try {
+        mesh = createWaterSurface(geo, cfg);
+    } catch (err) {
+        console.warn('Water mode', waterSurfaceMode, 'failed to build; falling back to reflective.', err);
+        const fallback = waterSurfaceMode;
+        waterSurfaceMode = WATER_MODE_REFLECTIVE;
+        try { mesh = createWaterSurface(geo, cfg); } catch (e2) { console.error('Reflective water also failed', e2); return null; }
+        waterSurfaceMode = fallback;
+    }
+    if (!mesh) return null;
+    mesh.visible = cfg.visible !== false;
+    scene.add(mesh);
+    if (Array.isArray(cfg.bucket)) cfg.bucket.push(mesh);
+    waterSurfaceRegistry.push({ geo, cfg, mesh });
+    return mesh;
+}
+
+function disposeWaterSurfaceMesh(mesh, cfg) {
+    if (!mesh) return;
+    scene.remove(mesh);
+    if (Array.isArray(cfg?.bucket)) {
+        const i = cfg.bucket.indexOf(mesh);
+        if (i >= 0) cfg.bucket.splice(i, 1);
+    }
+    const bi = bridgeLibraryWaterSurfaces.indexOf(mesh);
+    if (bi >= 0) bridgeLibraryWaterSurfaces.splice(bi, 1);
+    if (typeof mesh.dispose === 'function') {
+        try { mesh.dispose(); } catch (err) {}
+    }
+    if (mesh.material && typeof mesh.material.dispose === 'function') mesh.material.dispose();
+}
+
+// Rebuild every registered surface in the current mode, preserving visibility.
+function rebuildAllWaterSurfaces() {
+    for (const entry of waterSurfaceRegistry) {
+        const wasVisible = entry.mesh ? entry.mesh.visible : true;
+        const isTownPuddle = entry.mesh === townPuddleWater;
+        disposeWaterSurfaceMesh(entry.mesh, entry.cfg);
+        let next = null;
+        try {
+            next = createWaterSurface(entry.geo, entry.cfg);
+        } catch (err) {
+            console.warn('Water mode rebuild failed for', entry.cfg?.role, err);
+        }
+        entry.mesh = next;
+        if (!next) continue;
+        next.visible = wasVisible;
+        scene.add(next);
+        if (Array.isArray(entry.cfg.bucket)) entry.cfg.bucket.push(next);
+        if (entry.cfg.registerAsLibrary) bridgeLibraryWaterSurfaces.push(next);
+        if (isTownPuddle) townPuddleWater = next;
+    }
+}
+
+function setWaterSurfaceMode(mode) {
+    const m = Math.max(0, Math.min(WATER_MODE_COUNT - 1, mode | 0));
+    if (m === waterSurfaceMode) return;
+    const prev = waterSurfaceMode;
+    waterSurfaceMode = m;
+    // This runs from applyWaterFxFromSettingsUi(), which is called at module
+    // scope during boot OUTSIDE any try/catch - so anything thrown here would
+    // abort module evaluation and take the whole menu down with it (the
+    // difficulty cards render further down the same script). A cosmetic water
+    // setting must never be able to stop the game starting.
+    try {
+        if (m === WATER_MODE_RIPPLES) initRippleSim();
+        rebuildAllWaterSurfaces();
+    } catch (err) {
+        console.error('Water mode', m, 'failed to apply; reverting to', prev, err);
+        waterSurfaceMode = prev;
+        try { rebuildAllWaterSurfaces(); } catch (e2) {
+            console.error('Water mode revert also failed', e2);
+        }
+    }
+}
+
 function addStoryBridgeVisualWaterCap(
     shapeGeometry,
     yBase = SIMPLE_WATER_SURFACE_Y,
@@ -8529,36 +10571,21 @@ function addStoryBridgeVisualWaterCap(
             uv.needsUpdate = true;
         }
 
-        libraryWater = new Water(waterGeo, {
-            textureWidth: texW,
-            textureHeight: texH,
-            waterNormals,
-            sunDirection: sunDir.clone().normalize(),
-            sunColor: 0xffffff,
+        // Built through the mode registry so Settings > Water Effects > Mode can
+        // rebuild it as Water / ripples / Refractor / Water2 / Reflector.
+        libraryWater = addWaterSurface(waterGeo, {
+            x: centerX,
+            y: yBase - 0.006,
+            z: centerZ,
+            role: levelRole,
+            bucket: meshBucket,
+            visible: showLevelWater,
+            registerAsLibrary: true,
             waterColor: readableWaterColor.getHex(),
-            distortionScale: isMobileProfile ? 0.22 : 0.30,
-            fog: !!scene.fog,
+            color: readableWaterColor.getHex(),
             alpha: Math.max(0.12, Math.min(0.92, waterFxOpacity * 0.72)),
         });
-        libraryWater.rotation.x = -Math.PI / 2;
-        libraryWater.position.set(centerX, yBase - 0.006, centerZ);
-        libraryWater.name = `libraryWater-${levelRole}`;
-        libraryWater.visible = showLevelWater;
-        libraryWater.receiveShadow = false;
-        // Ring-shaped ShapeGeometry can wind opposite between levels.
-        // Render both sides so castle moat water never disappears from top view.
-        if (libraryWater.material) {
-            libraryWater.material.side = THREE.DoubleSide;
-        }
-        libraryWater.frustumCulled = false;
-        libraryWater.userData = libraryWater.userData || {};
-        libraryWater.userData.waterRole = levelRole;
-        if (libraryWater.material?.uniforms?.size) {
-            libraryWater.material.uniforms.size.value = WATER_LIBRARY_WAVE_SIZE;
-        }
-        scene.add(libraryWater);
-        meshBucket.push(libraryWater);
-        bridgeLibraryWaterSurfaces.push(libraryWater);
+        if (libraryWater) bridgeLibraryWaterSurfaces.push(libraryWater);
     }
 
     // Optional tinted top cap. Keep this off for bridge by default when murky
@@ -12653,6 +14680,11 @@ const RAGDOLL_MAX_SPIN = isMobileProfile ? 6.0 : 8.0;
 const RAGDOLL_MAX_SPIN2 = RAGDOLL_MAX_SPIN * RAGDOLL_MAX_SPIN;
 const RAGDOLL_MAX_SPEED = isMobileProfile ? 14.0 : 18.0;
 const RAGDOLL_MAX_SPEED2 = RAGDOLL_MAX_SPEED * RAGDOLL_MAX_SPEED;
+// A body carrying a live `_flingUntilMs` is mid-launch (point-blank buckshot),
+// so it gets a much higher ceiling until the window closes and the usual clamp
+// takes over again. Without this the clamp ate the shove on the next step.
+const RAGDOLL_FLING_MAX_SPEED = isMobileProfile ? 26.0 : 36.0;
+const RAGDOLL_FLING_MAX_SPEED2 = RAGDOLL_FLING_MAX_SPEED * RAGDOLL_FLING_MAX_SPEED;
 const BRIDGE_BLAST_FLING_CHANCE = 0.40;
 const CASTLE_BLAST_FLING_CHANCE = 0.30;
 const CASTLE_ARCHER_BLAST_FLING_CHANCE = 0.50;
@@ -13114,13 +15146,18 @@ function _spawnArrowMesh(origin, dir, speed) {
 // === Scoring ===
 let score = 0, bricksDestroyed = 0, shotsFired = 0;
 let bestShotDamage = 0;
-let AMMO_START = [12, 10, 3, 2, 200, 5, 1, 0, 0]; // shotgun, standard, explosive, mortar, minigun, sniper, drone, grenade, cluster
+// shotgun, standard, explosive, mortar, minigun, sniper, drone, grenade,
+// cluster, karate. The karate slot holds Infinity when the mode grants it:
+// `Infinity` is never === 0, so the weapon-skip logic in setWeapon() and
+// nextSelectableWeapon() treats it as always available, and decrementing it
+// (which melee never does) would be a no-op anyway. ammoText() renders it.
+let AMMO_START = [12, 10, 3, 2, 200, 5, 1, 0, 0, 0, 0, 0];
 let p1Ammo = [...AMMO_START];
 let p2Ammo = [...AMMO_START];
 let currentDifficulty = 'knight';   // set from the start modal
-let cannonImpactScale = 170;        // settings slider (1..500)
-let storyModePreference = false;    // user-selected start mode from the modal (classic/new levels default)
-let levelPreference = 'castle';     // user-selected level when not in story campaign
+const cannonImpactScale = 500;      // fixed: the old slider's max, tuned and locked in
+let storyModePreference = true;     // user-selected start mode from the modal (story campaign is the default)
+let levelPreference = 'town';       // user-selected level when not in story campaign
 let templateLevelEnabled = false;   // settings override: empty grass template level
 let bridge2LevelEnabled = false;    // settings override: template + bridge bricks/physics only
 let bridgeDevLevelEnabled = false;  // settings override: rebuilt dev bridge with steps + thick arches
@@ -13197,6 +15234,19 @@ function updateEnemyCountUi() {
     if (el2) el2.textContent = alive;
 }
 
+// Ammo label for one weapon slot. Unlimited slots (the karate chop) hold
+// Infinity, which would otherwise render as the literal string "Infinity".
+function ammoText(idx) {
+    const n = p1Ammo[idx];
+    if (n === Infinity) return '\u221e';        // the infinity glyph
+    // The rifle reads as magazine / reserve, the way a shooter's HUD does. n is
+    // the TOTAL carried, so the reserve is what is left outside the magazine.
+    if (idx === WEAPON_IDX_RIFLE && (n ?? 0) > 0) {
+        return `${rifleMag} / ${Math.max(0, (n || 0) - rifleMag)}`;
+    }
+    return '\u00d7' + (n ?? 0);
+}
+
 function updateUI() {
     document.getElementById("scoreValue").textContent = score;
     document.getElementById("bricksHit").textContent  = bricksDestroyed;
@@ -13205,9 +15255,24 @@ function updateUI() {
     updateEnemyCountUi();
     for (let i = 0; i < WEAPONS.length; i++) {
         const el = document.getElementById('ammo' + i);
-        if (el) el.textContent = '\u00d7' + p1Ammo[i];
+        if (el) el.textContent = ammoText(i);
         const btn = document.getElementById('wBtn' + i);
-        if (btn) btn.classList.toggle('empty', p1Ammo[i] === 0);
+        if (!btn) continue;
+        btn.classList.toggle('empty', p1Ammo[i] === 0);
+        // The bar lists what the player actually HAS, not the full catalogue.
+        // "Owned" mirrors the skip rule in setWeapon()/nextSelectableWeapon()
+        // exactly: in two-player mode a slot counts as owned while either
+        // player still has rounds for it.
+        const p1e = p1Ammo[i] === 0;
+        const p2e = !twoPlayerMode || p2Ammo[i] === 0;
+        const owned = !(p1e && p2e);
+        // The current weapon stays listed even at zero, so firing your last
+        // round does not make the slot you are holding disappear.
+        // display:'' restores the stylesheet value rather than forcing block --
+        // and the button must be HIDDEN, never removed: the click handlers were
+        // bound once by DOM index, so removing a node would shift every
+        // subsequent weapon's index by one.
+        btn.style.display = (owned || i === currentWeapon) ? '' : 'none';
     }
     renderMobileWeaponRoller();
 }
@@ -14143,6 +16208,30 @@ function playMinigunShot() {
     whirr.stop(now + 0.11);
 }
 
+// Pre-baked decaying-noise variants for the shotgun crack/echo tails. Built
+// once on first fire (sampleRate is only known then), cycled per shot so the
+// tail still varies without ~16k Math.random() calls on the firing frame.
+const _SHOTGUN_NOISE_VARIANTS = 4;
+let _shotgunCrackBufs = null;
+let _shotgunEchoBufs = null;
+let _shotgunNoiseCursor = 0;
+function _buildShotgunNoiseBufs(ctx) {
+    const sr = ctx.sampleRate;
+    const make = (seconds, decay) => {
+        const len = Math.floor(sr * seconds);
+        const buf = ctx.createBuffer(1, len, sr);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-(i / sr) * decay);
+        return buf;
+    };
+    _shotgunCrackBufs = [];
+    _shotgunEchoBufs = [];
+    for (let v = 0; v < _SHOTGUN_NOISE_VARIANTS; v++) {
+        _shotgunCrackBufs.push(make(0.11, 62));
+        _shotgunEchoBufs.push(make(0.22, 24));
+    }
+}
+
 function playShotgunShot() {
     if (!soundEnabled) return;
     // Layer two close cannon-fire cues to suggest both barrels discharging.
@@ -14167,14 +16256,10 @@ function playShotgunShot() {
     thump.start(now);
     thump.stop(now + 0.28);
 
-    const crackLen = Math.floor(sr * 0.11);
-    const crackBuf = ctx.createBuffer(1, crackLen, sr);
-    const crackData = crackBuf.getChannelData(0);
-    for (let i = 0; i < crackLen; i++) {
-        const t = i / sr;
-        crackData[i] = (Math.random() * 2 - 1) * Math.exp(-t * 62);
-    }
-    const crackSrc = ctx.createBufferSource(); crackSrc.buffer = crackBuf;
+    if (!_shotgunCrackBufs) _buildShotgunNoiseBufs(ctx);
+    const noiseVariant = _shotgunNoiseCursor;
+    _shotgunNoiseCursor = (_shotgunNoiseCursor + 1) % _SHOTGUN_NOISE_VARIANTS;
+    const crackSrc = ctx.createBufferSource(); crackSrc.buffer = _shotgunCrackBufs[noiseVariant];
     const crackBP = ctx.createBiquadFilter();
     crackBP.type = 'bandpass';
     crackBP.frequency.value = 760;
@@ -14184,14 +16269,7 @@ function playShotgunShot() {
     crackSrc.connect(crackBP); crackBP.connect(crackGain); crackGain.connect(ctx.destination);
     crackSrc.start(now);
 
-    const echoLen = Math.floor(sr * 0.22);
-    const echoBuf = ctx.createBuffer(1, echoLen, sr);
-    const echoData = echoBuf.getChannelData(0);
-    for (let i = 0; i < echoLen; i++) {
-        const t = i / sr;
-        echoData[i] = (Math.random() * 2 - 1) * Math.exp(-t * 24);
-    }
-    const echoSrc = ctx.createBufferSource(); echoSrc.buffer = echoBuf;
+    const echoSrc = ctx.createBufferSource(); echoSrc.buffer = _shotgunEchoBufs[noiseVariant];
     const echoLP = ctx.createBiquadFilter();
     echoLP.type = 'lowpass';
     echoLP.frequency.value = 510;
@@ -14456,14 +16534,33 @@ function spawnSniperTracer(start, end) {
     sniperTracers.push({ mesh, life: 0.10, maxLife: 0.10 });
 }
 
-// Real Wilhelm scream fetched from Wikimedia Commons (public domain)
-// Falls back to synthesised version if fetch fails (CORS / network).
+// Real Wilhelm scream (public domain). Tries a self-hosted copy first and only
+// falls back to hotlinking Wikimedia Commons if that 404s; if both fail the
+// synthesised version in playWilhelmScream() covers it.
+//
+// A public deployment should NOT be leaning on Wikimedia's bandwidth on every
+// page load, so drop the file at public/audio/sfx/wilhelm_scream.ogg and this
+// picks it up automatically with no code change. See DEPLOY.md.
+const WILHELM_REMOTE_URL = 'https://upload.wikimedia.org/wikipedia/commons/d/d9/Wilhelm_Scream.ogg';
 let _wilhelmBuffer = null;
 let _wilhelmArrayBuf = null;
-fetch('https://upload.wikimedia.org/wikipedia/commons/d/d9/Wilhelm_Scream.ogg')
-    .then(r => r.arrayBuffer())
-    .then(ab => { _wilhelmArrayBuf = ab; })
-    .catch(() => {});
+(function loadWilhelmScream() {
+    const local = sfxPath('wilhelm_scream.ogg');
+    fetch(local)
+        .then(r => {
+            // A missing file on a static host is usually a 404, but some hosts
+            // serve an HTML error page with a 200 -- check the type as well, or
+            // decodeAudioData would choke on markup later.
+            const type = r.headers.get('content-type') || '';
+            if (!r.ok || type.includes('text/html')) throw new Error('no local copy');
+            return r.arrayBuffer();
+        })
+        .then(ab => { _wilhelmArrayBuf = ab; })
+        .catch(() => fetch(WILHELM_REMOTE_URL)
+            .then(r => r.arrayBuffer())
+            .then(ab => { _wilhelmArrayBuf = ab; })
+            .catch(() => {}));
+})();
 
 async function playWilhelmScream() {
     if (!soundEnabled) return;
@@ -14606,8 +16703,13 @@ const WEAPONS = [
     { name: 'FPV Drone',     blastR: DRONE_BLAST_RADIUS, arcLoft: 0, color: 0x2a2a2a },
     { name: 'Grenade',       blastR: 5.5,          arcLoft: 0,    color: 0x556b2f },
     { name: 'Cluster',       blastR: 2.4,          arcLoft: 0,    color: 0xdd4400 },
+    // Melee. blastR 0 / arcLoft 0 keep it clear of every projectile code path;
+    // the strike is resolved directly by meleeStrikeImpact().
+    { name: 'Karate Chop',   blastR: 0,            arcLoft: 0,    color: 0xe8e4d8 },
+    { name: 'Mae Geri',      blastR: 0,            arcLoft: 0,    color: 0xd8cfae },
+    { name: 'Assault Rifle', blastR: 0,            arcLoft: 0,    color: 0xd8d2c4 },
 ];
-const WEAPON_ICONS = ['💥', '⚫', '💣', '🌋', '⚡', '🎯', '🚁', '🟢', '✳️'];
+const WEAPON_ICONS = ['💥', '⚫', '💣', '🌋', '⚡', '🎯', '🚁', '🟢', '✳️', '🥋', '🦵', '🔫'];
 const POWER_SLIDER_MIN = 10;
 const POWER_SLIDER_MAX = 40;
 const WEAPON_SPEED_RANGES = [
@@ -14620,6 +16722,9 @@ const WEAPON_SPEED_RANGES = [
     { min: 0,   max: 0 },              // drone (self-propelled)
     { min: 8,   max: 26 },             // grenade launcher (medium throw range)
     { min: 10,  max: 34 },             // cluster bomb
+    { min: 0,   max: 0 },              // karate chop (melee, no projectile)
+    { min: 0,   max: 0 },              // mae geri   (melee, no projectile)
+    { min: 150, max: 215 },            // assault rifle (flatter and faster than the minigun)
 ];
 let weaponPowerByIndex = WEAPONS.map(() => POWER_SLIDER_MAX);
 
@@ -14635,15 +16740,31 @@ function getWeaponLaunchSpeed(weaponIdx, sliderPower) {
 
 function setPaused(paused) {
     gamePaused = paused;
+    // animate() early-returns while paused, so the AC-130 drone would otherwise
+    // hold its last gain indefinitely behind the pause overlay.
+    setAc130DroneMuted(paused);
     if (paused) clock.getDelta(); // drain accumulated dt so resuming doesn't jump
     // Show PAUSED banner only mid-game; on the initial screen lockMsg covers things already
     document.getElementById('pauseMsg').style.display = (paused && _hasPlayed) ? 'flex' : 'none';
 }
 
 function updateHearts() {
-    for (let i = 0; i < 3; i++) {
-        const h = document.getElementById('heart' + i);
-        if (h) h.classList.toggle('lost', i >= (3 - playerHits));
+    const row = document.getElementById('playerHealth');
+    if (!row) return;
+    // Grow the row if a medical drop has added a heart. Elements are only ever
+    // added, never removed, so a heart lost to damage still has somewhere to
+    // render its greyed-out state.
+    while (row.children.length < playerMaxHearts) {
+        const span = document.createElement('span');
+        span.className = 'heart';
+        span.id = 'heart' + row.children.length;
+        span.textContent = '\u2764\ufe0f';
+        row.appendChild(span);
+    }
+    for (let i = 0; i < row.children.length; i++) {
+        const h = row.children[i];
+        h.style.display = i < playerMaxHearts ? '' : 'none';
+        h.classList.toggle('lost', i >= (playerMaxHearts - playerHits));
     }
 }
 
@@ -14731,7 +16852,7 @@ function onPlayerHit() {
     const ov = document.getElementById('hitOverlay');
     ov.classList.add('active');
     setTimeout(() => ov.classList.remove('active'), 200);
-    if (playerHits >= 3) {
+    if (playerHits >= playerMaxHearts) {
         playWilhelmScream();
         setTimeout(() => showGameOver(true), 700);
     } else {
@@ -14929,6 +17050,10 @@ function beginBridgeDevLevel() {
 }
 
 function beginStoryModeRound() {
+    // A level change destroys any in-flight aircraft and any crate still on the
+    // ground, but deliberately keeps airdropPool: weapons the player has not
+    // been given yet follow them from the town to the bridge to the castle.
+    clearAirdropWorldObjects();
     _applyGroundMaterial(grassMat);  // restore textured grass for any non-bridge2 level
     setTemplateGroundOverrideActive(false);
     bridge2ModeActive = false;
@@ -15317,6 +17442,7 @@ function updateStoryProgression() {
     if (!storyModeEnabled || gameOver || !(_gameStarted || _hasPlayed) || guardsDisabled) return;
 
     if (townStageActive) {
+        updateTownDoorEmergence();
         updateTownProgression();
         return;
     }
@@ -15609,7 +17735,43 @@ function setWeapon(idx) {
     vmMortarGroup.visible  = (w === WEAPON_IDX_MORTAR);
     vmMinigunGroup.visible = (w === WEAPON_IDX_MINIGUN);
     vmSniperGroup.visible  = (w === WEAPON_IDX_SNIPER);
+    vmRifleGroup.visible   = (w === WEAPON_IDX_RIFLE);
+    vmRifleHand.visible    = (w === WEAPON_IDX_RIFLE);
+    vmKarateGroup.visible  = (w === WEAPON_IDX_KARATE);
+    vmMaeGeriGroup.visible = (w === WEAPON_IDX_MAEGERI);
+    {
+        // Abandon any swing in progress: switching away mid-strike must not
+        // leave a limb frozen out of pose or fire a late impact frame. The
+        // combo counter survives, so chop -> mae geri chains as one string.
+        const _meleeProfile = meleeProfileFor(w);
+        if (meleeSwinging) {
+            meleeSwinging = false;
+            meleeSwingT = 0;
+            meleeImpactDone = true;
+            meleeActiveWeapon = -1;
+            meleeFovOffset = 0;
+            meleeLungeZ = 0;
+        }
+        if (_meleeProfile) resetMeleePose(_meleeProfile);
+        else meleeComboCount = 0;      // leaving melee entirely drops the string
+    }
     if (w !== WEAPON_IDX_MINIGUN) minigunFiring = false;
+    if (w !== WEAPON_IDX_RIFLE) {
+        // Abandon a reload in progress rather than leaving the rifle frozen
+        // mid-animation for when the player comes back to it.
+        rifleFiring = false;
+        rifleReloadT = 0;
+        rifleReloadStage = -1;
+        rifleShotKick = 0;
+        resetRifleViewmodelPose();
+    } else {
+        // Selecting the rifle with an empty magazine tops it up silently: the
+        // player just picked it up, or just switched back to it.
+        if (rifleMag <= 0 && (p1Ammo[WEAPON_IDX_RIFLE] || 0) > 0) {
+            rifleMag = Math.min(RIFLE_MAG_SIZE, p1Ammo[WEAPON_IDX_RIFLE]);
+        }
+        resetRifleViewmodelPose();
+    }
     if (w !== WEAPON_IDX_SHOTGUN) {
         shotgunShotKick = 0;
         shotgunBreakAnim = 0;
@@ -16068,6 +18230,373 @@ function fireCannonballCooked(cookMs) {
     fireCannonball(parseFloat(powerSlider.value), cookMs);
 }
 
+// === Automatic rifle: reload, animation and audio ==========================
+// The magazine change is driven by a single 0..1 phase (rifleReloadT) rather
+// than a queue of timers, so pausing, dying or switching weapons mid-reload
+// just stops the clock instead of leaving stray callbacks to fire later.
+//
+// Phase map. These are the moments a real magazine change is built out of, and
+// each one owns a slice of the timeline:
+//   0.00-0.16  rifle comes down and rolls left; support hand leaves handguard
+//   0.16       magazine release - the old magazine drops away
+//   0.16-0.34  hand drops out of frame to the pouch
+//   0.34-0.56  hand returns carrying a fresh magazine
+//   0.56-0.72  magazine rides up into the well
+//   0.72       seated, with a small overshoot that settles
+//   0.72-0.84  hand slides back along the receiver to the charging handle
+//   0.84-0.94  handle pulled fully back and released - the bolt runs forward
+//   0.94-1.00  rifle returns to the ready pose
+const RIFLE_RL_DROP      = 0.16;
+const RIFLE_RL_POUCH     = 0.34;
+const RIFLE_RL_RETURN    = 0.56;
+const RIFLE_RL_SEAT      = 0.72;
+const RIFLE_RL_TO_HANDLE = 0.84;
+const RIFLE_RL_CHARGE    = 0.94;
+
+// Smoothstep: every limb in the animation eases rather than sliding linearly.
+function _rEase(t) {
+    const c = Math.max(0, Math.min(1, t));
+    return c * c * (3 - 2 * c);
+}
+// Normalised progress through one phase of the reload.
+function _rSeg(t, a, b) {
+    return Math.max(0, Math.min(1, (t - a) / (b - a)));
+}
+
+function rifleReserve() {
+    return Math.max(0, (p1Ammo[WEAPON_IDX_RIFLE] || 0) - rifleMag);
+}
+
+function startRifleReload() {
+    if (currentWeapon !== WEAPON_IDX_RIFLE) return;
+    if (rifleReloadT > 0 || gameOver) return;
+    const total = p1Ammo[WEAPON_IDX_RIFLE] || 0;
+    if (total <= 0) return;
+    if (rifleMag >= Math.min(RIFLE_MAG_SIZE, total)) return;   // already full
+    rifleReloadT = 0.0001;
+    rifleReloadStage = -1;
+    rifleFiring = false;    // trigger is released for the duration
+    setAirdropHud('Reloading...', RIFLE_RELOAD_MS);
+}
+
+// Puts every moving part back where it belongs. Called when the reload ends,
+// when the weapon is holstered, and when a round starts.
+function resetRifleViewmodelPose() {
+    vmRifleGroup.position.set(RIFLE_VM_REST.x, RIFLE_VM_REST.y, RIFLE_VM_REST.z);
+    vmRifleGroup.rotation.set(RIFLE_VM_REST.rx, RIFLE_VM_REST.ry, RIFLE_VM_REST.rz);
+    vmRifleMagPivot.position.set(0, RIFLE_MAG_REST_Y, RIFLE_MAG_REST_Z);
+    vmRifleMagPivot.rotation.set(0, 0, 0);
+    vmRifleMagPivot.visible = true;
+    vmRifleChargePivot.position.z = RIFLE_CHARGE_REST_Z;
+    vmRifleSpareMag.visible = false;
+    vmRifleDropMag.visible = false;
+    vmRifleHand.position.set(RIFLE_HAND_REST.x, RIFLE_HAND_REST.y, RIFLE_HAND_REST.z);
+    vmRifleHand.rotation.set(RIFLE_HAND_REST.rx, RIFLE_HAND_REST.ry, RIFLE_HAND_REST.rz);
+    vmRifleHand.visible = (currentWeapon === WEAPON_IDX_RIFLE);
+}
+
+const _rifleDropMagPos = new THREE.Vector3();
+// Releases the spent magazine into view space and gives it a tumble.
+function _releaseRifleDropMag() {
+    vmRifleMagPivot.getWorldPosition(_rifleDropMagPos);
+    camera.worldToLocal(_rifleDropMagPos);
+    vmRifleDropMag.position.copy(_rifleDropMagPos);
+    vmRifleDropMag.rotation.set(0.1, 0.2, -0.45);
+    vmRifleDropMag.visible = true;
+    _rifleDropMagVel.x = -0.10 - Math.random() * 0.06;
+    _rifleDropMagVel.y = -0.22;
+    _rifleDropMagVel.z = 0.10 + Math.random() * 0.05;
+    _rifleDropMagVel.rx = 2.2 + Math.random() * 1.4;
+    _rifleDropMagVel.rz = -1.6 - Math.random() * 1.2;
+}
+// Per-frame: the dropped magazine keeps falling even after the reload ends,
+// so this runs independently of rifleReloadT.
+function _stepRifleDropMag(dt) {
+    if (!vmRifleDropMag.visible) return;
+    _rifleDropMagVel.y -= 1.9 * dt;                 // view-space "gravity"
+    vmRifleDropMag.position.x += _rifleDropMagVel.x * dt;
+    vmRifleDropMag.position.y += _rifleDropMagVel.y * dt;
+    vmRifleDropMag.position.z += _rifleDropMagVel.z * dt;
+    vmRifleDropMag.rotation.x += _rifleDropMagVel.rx * dt;
+    vmRifleDropMag.rotation.z += _rifleDropMagVel.rz * dt;
+    if (vmRifleDropMag.position.y < -1.1) vmRifleDropMag.visible = false;
+}
+
+function updateRifleViewmodel(dt) {
+    _stepRifleDropMag(dt);
+    // Muzzle heat bleeds off whether or not the rifle is in hand.
+    if (vmRifleGlowMat.emissiveIntensity > 0) {
+        vmRifleGlowMat.emissiveIntensity = Math.max(0, vmRifleGlowMat.emissiveIntensity - dt * 1.4);
+    }
+    if (currentWeapon !== WEAPON_IDX_RIFLE) return;
+
+    // Recoil: a per-shot kick that decays fast, plus the slower bleed-off of
+    // accumulated muzzle climb between bursts.
+    rifleShotKick = Math.max(0, rifleShotKick - dt * 7.5);
+    if (!rifleFiring) rifleRecoilPitch = Math.max(0, rifleRecoilPitch - dt * 0.09);
+
+    if (rifleReloadT > 0) {
+        rifleReloadT += dt * (1000 / RIFLE_RELOAD_MS);
+        const t = rifleReloadT;
+
+        // --- the weapon itself: down into the reload pose and back ----------
+        // One blend value covers both halves: it ramps in over the opening
+        // phase, holds through the magazine work, and ramps back out at the end.
+        const intoPose = _rEase(_rSeg(t, 0, RIFLE_RL_DROP));
+        const outOfPose = _rEase(_rSeg(t, RIFLE_RL_CHARGE, 1));
+        const pose = intoPose * (1 - outOfPose);
+        vmRifleGroup.position.x = THREE.MathUtils.lerp(RIFLE_VM_REST.x, RIFLE_VM_RELOAD.x, pose);
+        vmRifleGroup.position.y = THREE.MathUtils.lerp(RIFLE_VM_REST.y, RIFLE_VM_RELOAD.y, pose);
+        vmRifleGroup.position.z = THREE.MathUtils.lerp(RIFLE_VM_REST.z, RIFLE_VM_RELOAD.z, pose);
+        vmRifleGroup.rotation.x = THREE.MathUtils.lerp(RIFLE_VM_REST.rx, RIFLE_VM_RELOAD.rx, pose);
+        vmRifleGroup.rotation.y = THREE.MathUtils.lerp(RIFLE_VM_REST.ry, RIFLE_VM_RELOAD.ry, pose);
+        vmRifleGroup.rotation.z = THREE.MathUtils.lerp(RIFLE_VM_REST.rz, RIFLE_VM_RELOAD.rz, pose);
+
+        // --- the magazine in the well --------------------------------------
+        if (t < RIFLE_RL_DROP) {
+            vmRifleMagPivot.visible = true;
+            vmRifleMagPivot.position.set(0, RIFLE_MAG_REST_Y, RIFLE_MAG_REST_Z);
+            vmRifleMagPivot.rotation.set(0, 0, 0);
+        } else if (t < RIFLE_RL_SEAT) {
+            vmRifleMagPivot.visible = false;   // out of the gun; the drop mag has it
+        } else {
+            // Seated, with a short overshoot so it lands with weight rather
+            // than snapping to its final position.
+            const seat = _rSeg(t, RIFLE_RL_SEAT, RIFLE_RL_SEAT + 0.08);
+            const overshoot = Math.sin(seat * Math.PI) * 0.012;
+            vmRifleMagPivot.visible = true;
+            vmRifleMagPivot.position.set(0, RIFLE_MAG_REST_Y - overshoot, RIFLE_MAG_REST_Z);
+            vmRifleMagPivot.rotation.set(0, 0, 0);
+        }
+
+        // --- the support hand ----------------------------------------------
+        // Four waypoints: handguard -> magazine well -> out of frame (pouch)
+        // -> back up into the well -> up the receiver to the charging handle.
+        let hx, hy, hz, hrx = 0, hrz = 0;
+        if (t < RIFLE_RL_DROP) {
+            const k = _rEase(_rSeg(t, 0, RIFLE_RL_DROP));
+            hx = THREE.MathUtils.lerp(RIFLE_HAND_REST.x, 0.055, k);
+            hy = THREE.MathUtils.lerp(RIFLE_HAND_REST.y, -0.300, k);
+            hz = THREE.MathUtils.lerp(RIFLE_HAND_REST.z, -0.300, k);
+            hrz = k * 0.35;
+        } else if (t < RIFLE_RL_POUCH) {
+            // Straight down and out of shot, carrying the old magazine away.
+            const k = _rEase(_rSeg(t, RIFLE_RL_DROP, RIFLE_RL_POUCH));
+            hx = THREE.MathUtils.lerp(0.055, 0.140, k);
+            hy = THREE.MathUtils.lerp(-0.300, -0.620, k);
+            hz = THREE.MathUtils.lerp(-0.300, -0.210, k);
+            hrz = 0.35 + k * 0.5;
+        } else if (t < RIFLE_RL_RETURN) {
+            // Off-screen at the pouch, then rising back with a fresh magazine.
+            const k = _rEase(_rSeg(t, RIFLE_RL_POUCH, RIFLE_RL_RETURN));
+            hx = THREE.MathUtils.lerp(0.140, 0.080, k);
+            hy = THREE.MathUtils.lerp(-0.620, -0.470, k);
+            hz = THREE.MathUtils.lerp(-0.210, -0.280, k);
+            hrz = 0.85 - k * 0.4;
+        } else if (t < RIFLE_RL_SEAT) {
+            // The insert: the magazine is driven up into the well.
+            const k = _rEase(_rSeg(t, RIFLE_RL_RETURN, RIFLE_RL_SEAT));
+            hx = THREE.MathUtils.lerp(0.080, 0.048, k);
+            hy = THREE.MathUtils.lerp(-0.470, -0.315, k);
+            hz = THREE.MathUtils.lerp(-0.280, -0.297, k);
+            hrz = 0.45 - k * 0.12;
+        } else if (t < RIFLE_RL_TO_HANDLE) {
+            // Slap the magazine base home, then run back along the receiver.
+            const k = _rEase(_rSeg(t, RIFLE_RL_SEAT, RIFLE_RL_TO_HANDLE));
+            const slap = Math.sin(Math.min(1, _rSeg(t, RIFLE_RL_SEAT, RIFLE_RL_SEAT + 0.05)) * Math.PI) * 0.018;
+            hx = THREE.MathUtils.lerp(0.048, 0.090, k);
+            hy = THREE.MathUtils.lerp(-0.315, -0.150, k) - slap;
+            hz = THREE.MathUtils.lerp(-0.297, -0.150, k);
+            hrz = 0.33 - k * 0.33;
+        } else {
+            // On the charging handle: back, then forward with the bolt.
+            const pull = Math.sin(Math.min(1, _rSeg(t, RIFLE_RL_TO_HANDLE, RIFLE_RL_CHARGE)) * Math.PI);
+            const back = pull * 0.085;
+            const home = _rEase(_rSeg(t, RIFLE_RL_CHARGE, 1));
+            hx = THREE.MathUtils.lerp(0.090, RIFLE_HAND_REST.x, home);
+            hy = THREE.MathUtils.lerp(-0.150, RIFLE_HAND_REST.y, home);
+            hz = THREE.MathUtils.lerp(-0.150 + back, RIFLE_HAND_REST.z, home);
+            // The charging handle rides with the hand, then snaps home.
+            vmRifleChargePivot.position.z = RIFLE_CHARGE_REST_Z + back;
+        }
+        vmRifleHand.visible = true;
+        vmRifleHand.position.set(hx, hy, hz);
+        vmRifleHand.rotation.set(hrx, 0, hrz);
+        // The spare magazine is in the hand only between the pouch grab and the
+        // moment it seats.
+        vmRifleSpareMag.visible = (t >= RIFLE_RL_POUCH && t < RIFLE_RL_SEAT);
+
+        // --- audio + the actual ammunition transfer -------------------------
+        const stage =
+            t >= 0.90 ? 4 :
+            t >= RIFLE_RL_TO_HANDLE ? 3 :
+            t >= RIFLE_RL_SEAT ? 2 :
+            t >= RIFLE_RL_POUCH ? 1 :
+            t >= RIFLE_RL_DROP ? 0 : -1;
+        if (stage > rifleReloadStage) {
+            rifleReloadStage = stage;
+            if (stage === 0) _releaseRifleDropMag();
+            if (stage === 2) {
+                // Rounds only move when the magazine is physically seated, so
+                // an interrupted reload genuinely gives you nothing.
+                rifleMag = Math.min(RIFLE_MAG_SIZE, rifleMag + rifleReserve());
+                updateUI();
+            }
+            playRifleReloadStage(stage);
+        }
+
+        if (rifleReloadT >= 1) {
+            rifleReloadT = 0;
+            rifleReloadStage = -1;
+            resetRifleViewmodelPose();
+            updateUI();
+        }
+        return;   // the reload owns the pose; no sway or recoil on top of it
+    }
+
+    // --- ready pose: recoil kick and a little idle sway --------------------
+    const kick = Math.min(1, rifleShotKick);
+    vmRifleGroup.position.z = RIFLE_VM_REST.z + kick * 0.055;
+    vmRifleGroup.position.y = RIFLE_VM_REST.y - kick * 0.010;
+    vmRifleGroup.rotation.x = RIFLE_VM_REST.rx - kick * 0.14;
+    vmRifleGroup.position.x = RIFLE_VM_REST.x;
+    vmRifleGroup.rotation.y = RIFLE_VM_REST.ry;
+    vmRifleGroup.rotation.z = RIFLE_VM_REST.rz + kick * 0.03;
+    vmRifleHand.visible = true;
+    vmRifleHand.position.set(
+        RIFLE_HAND_REST.x,
+        RIFLE_HAND_REST.y - kick * 0.008,
+        RIFLE_HAND_REST.z + kick * 0.050
+    );
+    vmRifleHand.rotation.set(0, 0, 0);
+    vmRifleChargePivot.position.z = RIFLE_CHARGE_REST_Z;
+    vmRifleMagPivot.visible = true;
+}
+
+// Reload audio. One short synthesised cue per stage: a magazine change is a
+// sequence of distinct mechanical sounds, and hearing them in order is most of
+// what sells the animation.
+function playRifleReloadStage(stage) {
+    if (!soundEnabled) return;
+    let ctx;
+    try { ctx = getAudio(); } catch (e) { return; }
+    const now = ctx.currentTime;
+    // A short filtered noise burst - the common ingredient in all of these.
+    const clack = (delay, dur, freq, q, gain, decay) => {
+        const len = Math.max(64, Math.floor(ctx.sampleRate * dur));
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) {
+            d[i] = (Math.random() * 2 - 1) * Math.exp(-(i / ctx.sampleRate) * decay);
+        }
+        const src = ctx.createBufferSource(); src.buffer = buf;
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = q;
+        const g = ctx.createGain(); g.gain.value = gain;
+        src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+        src.start(now + delay);
+    };
+    // A short pitched thunk for the metal-on-metal seating sounds.
+    const thunk = (delay, f0, f1, dur, gain) => {
+        const o = ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.setValueAtTime(f0, now + delay);
+        o.frequency.exponentialRampToValueAtTime(f1, now + delay + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, now + delay);
+        g.gain.exponentialRampToValueAtTime(gain, now + delay + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + delay + dur);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(now + delay); o.stop(now + delay + dur + 0.02);
+    };
+    if (stage === 0) {
+        clack(0, 0.05, 2600, 3.2, 0.22, 90);       // magazine catch
+        clack(0.07, 0.10, 900, 1.4, 0.16, 38);     // magazine rocking free
+    } else if (stage === 1) {
+        clack(0, 0.09, 1500, 1.1, 0.12, 34);       // fresh magazine off the rig
+    } else if (stage === 2) {
+        thunk(0, 300, 92, 0.13, 0.75);             // seated
+        clack(0.015, 0.06, 1800, 2.0, 0.20, 70);
+        clack(0.11, 0.05, 1200, 2.4, 0.13, 80);    // the slap on the base plate
+    } else if (stage === 3) {
+        clack(0, 0.13, 2100, 1.6, 0.20, 26);       // handle drawn back
+        thunk(0.02, 210, 130, 0.11, 0.30);
+    } else if (stage === 4) {
+        thunk(0, 420, 110, 0.10, 0.95);            // bolt runs forward
+        clack(0, 0.07, 3000, 2.6, 0.28, 60);
+        clack(0.03, 0.09, 700, 1.2, 0.16, 40);
+    }
+}
+
+// Hammer falling on an empty chamber. Rate-limited so holding the trigger on
+// an empty rifle clicks once a beat rather than buzzing.
+let _rifleDryFireAt = 0;
+function playRifleDryFire() {
+    if (!soundEnabled) return;
+    const nowMs = performance.now();
+    if (nowMs - _rifleDryFireAt < 260) return;
+    _rifleDryFireAt = nowMs;
+    let ctx;
+    try { ctx = getAudio(); } catch (e) { return; }
+    const now = ctx.currentTime;
+    const len = Math.floor(ctx.sampleRate * 0.035);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * Math.exp(-(i / ctx.sampleRate) * 180);
+    }
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 3200; bp.Q.value = 3.0;
+    const g = ctx.createGain(); g.gain.value = 0.22;
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(now);
+}
+
+// Rifle report: sharper and shorter than the cannon, fuller than the minigun.
+let _rifleCrackBufs = null;
+let _rifleCrackCursor = 0;
+function playRifleShot() {
+    if (!soundEnabled) return;
+    tryPlaySfxCue('cannon_fire', { gain: 0.20, rateJitter: 0.05 });
+    let ctx;
+    try { ctx = getAudio(); } catch (e) { return; }
+    const now = ctx.currentTime;
+    if (!_rifleCrackBufs) {
+        // Pre-baked, for the same reason the shotgun's tails are: at ~650 rpm
+        // this runs eleven times a second and must not synthesise noise on the
+        // firing frame.
+        _rifleCrackBufs = [];
+        for (let v = 0; v < 4; v++) {
+            const len = Math.floor(ctx.sampleRate * 0.075);
+            const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+            const d = buf.getChannelData(0);
+            for (let i = 0; i < len; i++) {
+                d[i] = (Math.random() * 2 - 1) * Math.exp(-(i / ctx.sampleRate) * 96);
+            }
+            _rifleCrackBufs.push(buf);
+        }
+    }
+    const buf = _rifleCrackBufs[(_rifleCrackCursor++) & 3];
+    const src = ctx.createBufferSource(); src.buffer = buf;
+    src.playbackRate.value = 0.94 + Math.random() * 0.12;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 520;
+    const crackGain = ctx.createGain(); crackGain.gain.value = 0.30;
+    src.connect(hp); hp.connect(crackGain); crackGain.connect(ctx.destination);
+    src.start(now);
+    // Low body under the crack, so it has some chest to it.
+    const body = ctx.createOscillator();
+    body.type = 'triangle';
+    body.frequency.setValueAtTime(190, now);
+    body.frequency.exponentialRampToValueAtTime(62, now + 0.075);
+    const bodyGain = ctx.createGain();
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.exponentialRampToValueAtTime(0.85, now + 0.006);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+    body.connect(bodyGain); bodyGain.connect(ctx.destination);
+    body.start(now); body.stop(now + 0.13);
+}
 function fireCannonball(power, grenadeCookMs = 0) {
     if (gameOver || p1Ammo[currentWeapon] <= 0) return;
     markSfxCombatActivity();
@@ -16079,6 +18608,19 @@ function fireCannonball(power, grenadeCookMs = 0) {
     const isHeavyRound = (currentWeapon === WEAPON_IDX_CANNON);
     const isGrenade    = (currentWeapon === WEAPON_IDX_GRENADE);
     const isCluster    = (currentWeapon === WEAPON_IDX_CLUSTER);
+    const isRifle      = (currentWeapon === WEAPON_IDX_RIFLE);
+    // The rifle fires from its magazine, not straight from the reserve. An
+    // empty magazine starts a reload instead of a shot.
+    if (isRifle) {
+        if (rifleReloadT > 0) return;
+        if (rifleMag <= 0) {
+            // Reserve left means reload; nothing left at all means a dry click,
+            // so an empty rifle still tells you why it is not shooting.
+            if (rifleReserve() > 0) startRifleReload();
+            else playRifleDryFire();
+            return;
+        }
+    }
     const now = performance.now();
     if (isShotgun && now < shotgunNextFire) return;
     if (isShotgun) shotgunNextFire = now + SHOTGUN_RATE;
@@ -16125,10 +18667,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
                 .addScaledVector(up, pitchJitter)
                 .normalize();
 
-            const mesh = new THREE.Mesh(
-                new THREE.SphereGeometry(0.055, 6, 6),
-                new THREE.MeshStandardMaterial({ color: 0xd7d0c2, metalness: 0.82, roughness: 0.24 })
-            );
+            const mesh = new THREE.Mesh(SHOTGUN_PELLET_GEO, SHOTGUN_PELLET_MAT);
             scene.add(mesh);
 
             const body = new CANNON.Body({
@@ -16383,6 +18922,28 @@ function fireCannonball(power, grenadeCookMs = 0) {
         const _mf = camera.position.clone().addScaledVector(fwd, 1.5);
         popFlash(_mf.x, _mf.y, _mf.z, 0xffffaa, 12, 6, 40);
         addShake(0.05);   // light rattle per round
+    } else if (isRifle) {
+        rifleMag--;
+        playRifleShot();
+        const _rf = camera.position.clone().addScaledVector(fwd, 1.6);
+        popFlash(_rf.x, _rf.y, _rf.z, 0xffd489, 26, 11, 55);
+        addShake(0.10);
+        rifleShotKick = Math.min(1.5, rifleShotKick + 1.0);
+        // Muzzle climb accumulates through a burst and bleeds off between them,
+        // so tapping stays accurate and holding the trigger walks the shots up.
+        // The per-shot climb tapers as the accumulated total nears its ceiling,
+        // which is what makes a long burst settle into a pattern rather than
+        // walking off the top of the screen.
+        const RIFLE_CLIMB_CAP = 0.085;
+        const climbRoom = 1 - Math.min(1, rifleRecoilPitch / RIFLE_CLIMB_CAP);
+        const climb = 0.0072 * (0.22 + 0.78 * climbRoom);
+        rifleRecoilPitch = Math.min(RIFLE_CLIMB_CAP, rifleRecoilPitch + climb);
+        pitch = clampAimPitch(pitch + climb + Math.random() * 0.0022);
+        yaw += (Math.random() - 0.5) * 0.0035;
+        vmRifleGlowMat.emissiveIntensity = Math.min(1.5, vmRifleGlowMat.emissiveIntensity + 0.22);
+        // Last round out of the magazine reloads itself, the way it would if
+        // the player had been counting.
+        if (rifleMag <= 0 && (p1Ammo[WEAPON_IDX_RIFLE] || 0) > 0) startRifleReload();
     } else if (isSniper) {
         playSniperShot();
         const _sf = camera.position.clone().addScaledVector(fwd, 2.1);
@@ -16397,7 +18958,11 @@ function fireCannonball(power, grenadeCookMs = 0) {
     }
 
     const ballColor  = wep.color;
-    const ballRadius = isMinigun ? 0.10 : isSniper ? 0.08 : currentWeapon === WEAPON_IDX_MORTAR ? 0.52 : BALL_RADIUS;
+    // The rifle round shares the minigun's light-and-fast body tuning; every
+    // `isMinigun ?` below is really "is this a bullet?", so fold the rifle in
+    // rather than threading a second flag through all of them.
+    const isBullet = isMinigun || isRifle;
+    const ballRadius = isRifle ? 0.085 : isMinigun ? 0.10 : isSniper ? 0.08 : currentWeapon === WEAPON_IDX_MORTAR ? 0.52 : BALL_RADIUS;
     const ballMat    = isMinigun
         ? new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.95, roughness: 0.15 })
         : isSniper
@@ -16409,23 +18974,25 @@ function fireCannonball(power, grenadeCookMs = 0) {
               emissiveIntensity: 0.6
           });
     const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(ballRadius, (isMinigun || isSniper) ? 6 : 16, (isMinigun || isSniper) ? 6 : 16),
+        new THREE.SphereGeometry(ballRadius, (isBullet || isSniper) ? 6 : 16, (isBullet || isSniper) ? 6 : 16),
         ballMat
     );
-    mesh.castShadow = !(isMinigun || isSniper);
+    mesh.castShadow = !(isBullet || isSniper);
     scene.add(mesh);
 
     const launchSpeed = getWeaponLaunchSpeed(currentWeapon, power);
     const body = new CANNON.Body({
-        mass: isMinigun ? 5 : isSniper ? 9 : currentWeapon === WEAPON_IDX_MORTAR ? 280 : 180,
+        // A rifle round is heavier than a minigun pellet: it is a slower
+        // weapon, so each hit has to be worth more.
+        mass: isRifle ? 11 : isMinigun ? 5 : isSniper ? 9 : currentWeapon === WEAPON_IDX_MORTAR ? 280 : 180,
         shape: new CANNON.Sphere(ballRadius),
-        linearDamping: isMinigun ? 0.01 : isSniper ? 0.01 : 0.08,
-        angularDamping: isMinigun ? 0.18 : isSniper ? 0.14 : 0.6,
+        linearDamping: isBullet ? 0.01 : isSniper ? 0.01 : 0.08,
+        angularDamping: isBullet ? 0.18 : isSniper ? 0.14 : 0.6,
         allowSleep: true,
-        sleepSpeedLimit: isMinigun ? 0.65 : isSniper ? 0.8 : 0.35,
-        sleepTimeLimit: isMinigun ? 0.18 : isSniper ? 0.18 : 0.3
+        sleepSpeedLimit: isBullet ? 0.65 : isSniper ? 0.8 : 0.35,
+        sleepTimeLimit: isBullet ? 0.18 : isSniper ? 0.18 : 0.3
     });
-    const start = camera.position.clone().addScaledVector(fwd, isMinigun ? 1.4 : isSniper ? 1.9 : 2.2);
+    const start = camera.position.clone().addScaledVector(fwd, isBullet ? 1.4 : isSniper ? 1.9 : 2.2);
     body.position.set(start.x, start.y, start.z);
     body.velocity.set(fwd.x * launchSpeed, fwd.y * launchSpeed, fwd.z * launchSpeed);
     world.addBody(body);
@@ -16447,8 +19014,9 @@ function fireCannonball(power, grenadeCookMs = 0) {
                 removeCannonballByBody(body);
             }, 80);
         });
-    } else if (isMinigun) {
-        // Minigun -- low per-shot kinetic nudge with small accumulated chip force.
+    } else if (isBullet) {
+        // Minigun / rifle -- low per-shot kinetic nudge with small accumulated
+        // chip force.
         // It can grind out an exposed brick after sustained fire, but should not
         // trigger broad wall cascades.
         let hit = false;
@@ -16468,10 +19036,10 @@ function fireCannonball(power, grenadeCookMs = 0) {
                     // Accumulate tiny "chip" energy on the struck resting brick.
                     // Sustained bursts can pop one exposed stone loose, but a single
                     // hit is too weak to disturb settled courses.
-                    e.body._mgChip = (e.body._mgChip || 0) + impact * 0.65;
+                    e.body._mgChip = (e.body._mgChip || 0) + impact * (isRifle ? 2.1 : 0.65);
                     if (e.body._mgChip >= 50) {
                         e.body._mgChip = 0;
-                        const chipImpulse = e.body.collisionFilterGroup === CGROUP_TOWER ? 42 : 52;
+                        const chipImpulse = (e.body.collisionFilterGroup === CGROUP_TOWER ? 42 : 52) * (isRifle ? 1.8 : 1);
                         e.body.wakeUp();
                         e.body.applyImpulse(
                             new CANNON.Vec3(
@@ -16488,7 +19056,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
                     }
                 } else {
                     // Loose debris still reacts immediately so bursts sweep rubble.
-                    const nudge = 16;
+                    const nudge = isRifle ? 34 : 16;
                     e.body.wakeUp();
                     e.body.applyImpulse(
                         new CANNON.Vec3(
@@ -16712,6 +19280,7 @@ function fireCannonball(power, grenadeCookMs = 0) {
 function p1Fire() {
     if (currentWeapon === WEAPON_IDX_DRONE && !activeDrone) { fireDrone(); return; }
     if (activeDrone) return; // drone active: fire button repurposed as ascend (touch handled separately)
+    if (meleeProfileFor(currentWeapon)) { startMeleeSwing(); return; }
     fireCannonball(parseFloat(powerSlider.value));
 }
 function p2Fire() { if (twoPlayerMode) fireCannonballP2(parseFloat(powerSlider.value)); }
@@ -16838,7 +19407,7 @@ function nextSelectableWeapon(from, dir) {
 }
 
 function weaponCardHtml(idx) {
-    return `<div class="mwCard"><div class="mwIcon">${WEAPON_ICONS[idx] || '•'}</div><div class="mwName">${WEAPONS[idx].name}</div><div class="mwAmmo">×${p1Ammo[idx] ?? 0}</div></div>`;
+    return `<div class="mwCard"><div class="mwIcon">${WEAPON_ICONS[idx] || '•'}</div><div class="mwName">${WEAPONS[idx].name}</div><div class="mwAmmo">${ammoText(idx)}</div></div>`;
 }
 
 function renderMobileWeaponRoller(selectedWeapon = currentWeapon) {
@@ -17053,6 +19622,9 @@ if (mobileFireBtn) {
         if (currentWeapon === WEAPON_IDX_MINIGUN) {
             minigunFiring = true;
             minigunNextFire = 0;
+        } else if (currentWeapon === WEAPON_IDX_RIFLE) {
+            rifleFiring = true;
+            rifleNextFire = 0;
         } else {
             p1Fire();
         }
@@ -17061,6 +19633,7 @@ if (mobileFireBtn) {
         e.preventDefault();
         e.stopPropagation();
         minigunFiring = false;
+        rifleFiring = false;
         droneAscend = false;   // release ascend on touch end
     };
     mobileFireBtn.addEventListener('touchstart', fireStart, { passive: false });
@@ -17128,12 +19701,11 @@ powerSlider.addEventListener("input", e => {
 const RELEASE_BUILD_STAMP = '2026-06-20';
 const settingsBtn   = document.getElementById('settingsBtn');
 const settingsPanel = document.getElementById('settingsPanel');
-const cannonImpactInput = document.getElementById('setCannonImpact');
-const cannonImpactValEl = document.getElementById('setCannonImpactVal');
 const buildStampEl = document.getElementById('buildStamp');
 const waterColorInputEl = document.getElementById('setWaterColor');
 const waterOpacityInputEl = document.getElementById('setWaterOpacity');
 const waterOpacityValEl = document.getElementById('setWaterOpacityVal');
+const waterModeInputEl = document.getElementById('setWaterMode');
 const waterImpactsInputEl = document.getElementById('setWaterImpacts');
 const waterRippleStrengthInputEl = document.getElementById('setWaterRippleStrength');
 const waterRippleStrengthValEl = document.getElementById('setWaterRippleStrengthVal');
@@ -17141,6 +19713,11 @@ const waterRippleSizeInputEl = document.getElementById('setWaterRippleSize');
 const waterRippleSizeValEl = document.getElementById('setWaterRippleSizeVal');
 const waterRippleLifeInputEl = document.getElementById('setWaterRippleLife');
 const waterRippleLifeValEl = document.getElementById('setWaterRippleLifeVal');
+const rippleSpeedInputEl = document.getElementById('setRippleSpeed');
+const rippleSpeedValEl = document.getElementById('setRippleSpeedVal');
+const rippleLifeInputEl = document.getElementById('setRippleLife');
+const rippleLifeValEl = document.getElementById('setRippleLifeVal');
+const rippleReachValEl = document.getElementById('setRippleReachVal');
 const templateLevelInputEl = document.getElementById('setTemplateLevel');
 const bridge2LevelInputEl     = document.getElementById('setBridge2Level');
 const townLevelInputEl        = document.getElementById('setTownLevel');
@@ -17179,12 +19756,24 @@ function updateWaterFxUiLabels() {
     if (waterRippleSizeValEl && waterRippleSizeInputEl) {
         waterRippleSizeValEl.textContent = `${clampInt(waterRippleSizeInputEl.value, 60, 260, 125)}%`;
     }
+    if (rippleSpeedValEl && rippleSpeedInputEl) {
+        rippleSpeedValEl.textContent = `${(clampInt(rippleSpeedInputEl.value, 40, 400, 120) / 100).toFixed(2)} m/s`;
+    }
+    if (rippleLifeValEl && rippleLifeInputEl) {
+        rippleLifeValEl.textContent = `${(clampInt(rippleLifeInputEl.value, 10, 80, 30) / 10).toFixed(1)} s`;
+    }
+    if (rippleReachValEl) {
+        rippleReachValEl.textContent = `~${rippleReachMetres().toFixed(1)} m`;
+    }
     if (waterRippleLifeValEl && waterRippleLifeInputEl) {
         waterRippleLifeValEl.textContent = `${clampInt(waterRippleLifeInputEl.value, 60, 240, 115)}%`;
     }
 }
 
 function setWaterFxInputsFromRuntimeState() {
+    if (waterModeInputEl) waterModeInputEl.value = String(waterSurfaceMode);
+    if (rippleSpeedInputEl) rippleSpeedInputEl.value = String(Math.round(rippleWaveSpeedMps * 100));
+    if (rippleLifeInputEl) rippleLifeInputEl.value = String(Math.round(rippleLifeSec * 10));
     if (waterColorInputEl) waterColorInputEl.value = hexColorToInputValue(waterFxColor);
     if (waterOpacityInputEl) waterOpacityInputEl.value = String(Math.round(Math.min(100, Math.max(20, waterFxOpacity * 100))));
     if (waterImpactsInputEl) waterImpactsInputEl.checked = !!waterFxImpactRipplesEnabled;
@@ -17201,7 +19790,10 @@ function readWaterFxFromSettingsUi() {
     const wrs = clampInt(waterRippleStrengthInputEl ? waterRippleStrengthInputEl.value : null, 50, 300, Math.round(waterFxRippleStrengthMul * 100));
     const wrz = clampInt(waterRippleSizeInputEl ? waterRippleSizeInputEl.value : null, 60, 260, Math.round(waterFxRippleSizeMul * 100));
     const wrl = clampInt(waterRippleLifeInputEl ? waterRippleLifeInputEl.value : null, 60, 240, Math.round(waterFxRippleLifeMul * 100));
-    return { wcl, wop, wir, wrs, wrz, wrl };
+    const wmd = clampInt(waterModeInputEl ? waterModeInputEl.value : null, 0, WATER_MODE_COUNT - 1, waterSurfaceMode);
+    const rsp = clampInt(rippleSpeedInputEl ? rippleSpeedInputEl.value : null, 10, 400, Math.round(rippleWaveSpeedMps * 100));
+    const rlf = clampInt(rippleLifeInputEl ? rippleLifeInputEl.value : null, 10, 80, Math.round(rippleLifeSec * 10));
+    return { wcl, wop, wir, wrs, wrz, wrl, wmd, rsp, rlf };
 }
 
 function applyWaterFxFromSettingsUi(saveToStorage = false) {
@@ -17212,6 +19804,12 @@ function applyWaterFxFromSettingsUi(saveToStorage = false) {
     waterFxRippleSizeMul = w.wrz / 100;
     waterFxRippleLifeMul = w.wrl / 100;
     setWaterImpactRipplesEnabled(w.wir);
+    // Live tunables: the sim reads these every step, so no rebuild needed.
+    rippleWaveSpeedMps = w.rsp / 100;
+    rippleLifeSec = w.rlf / 10;
+    // Mode change rebuilds every registered surface, so do it before the UI
+    // refresh reads runtime state back out.
+    setWaterSurfaceMode(w.wmd);
     setWaterFxInputsFromRuntimeState();
     applyWaterFxRuntimeTuning();
 
@@ -17224,11 +19822,45 @@ function applyWaterFxFromSettingsUi(saveToStorage = false) {
         o.wrs = w.wrs;
         o.wrz = w.wrz;
         o.wrl = w.wrl;
+        o.wmd = w.wmd;
+        o.rsp = w.rsp;
+        o.rlf = w.rlf;
         localStorage.setItem('castleSettings', JSON.stringify(o));
     } catch (err) {}
 }
 
 setWaterFxInputsFromRuntimeState();
+
+// --- Dev menu button visibility ---------------------------------------------
+// The 🧪 pill is hidden by default and revealed by Settings → Dev Menu Button.
+// The dev panel has no other entry point, so hiding the pill hides the whole
+// dev menu; Settings is always reachable, so this can never lock anyone out.
+//
+// The element is looked up on each call rather than captured in a module-scope
+// const. loadSettings() below runs during module evaluation, well BEFORE the
+// `const devMenuBtn` further down the file has initialised -- and esbuild lowers
+// that const to `var`, so the reference would silently be `undefined` and the
+// toggle would appear to do nothing on boot (DEV_NOTES.md section 2).
+let devMenuButtonEnabled = false;
+// The top-right strip runs [FPS badge][dev pill][settings], so the badge has to
+// close the 56 px gap when the pill is hidden or it floats away from the corner.
+function fpsBadgeRightPx() { return devMenuButtonEnabled ? '204px' : '148px'; }
+
+function setDevMenuButtonVisible(on) {
+    devMenuButtonEnabled = !!on;
+    const btn = document.getElementById('devMenuBtn');
+    if (btn) btn.style.display = devMenuButtonEnabled ? 'inline-flex' : 'none';
+    // _fpsBadge is a `var` declared further down, so this is safe to read here
+    // during boot: it hoists to undefined rather than throwing, and the guard
+    // handles the badge not existing yet.
+    if (_fpsBadge) _fpsBadge.style.right = fpsBadgeRightPx();
+    if (!devMenuButtonEnabled) {
+        // Turning the button off while its panel is open would otherwise leave
+        // an orphaned dev panel on screen with nothing to dismiss it.
+        const panel = document.getElementById('devPanel');
+        if (panel) panel.style.display = 'none';
+    }
+}
 
 // Load persisted settings from localStorage and apply to inputs + AMMO_START
 (function loadSettings() {
@@ -17246,6 +19878,9 @@ setWaterFxInputsFromRuntimeState();
         if (rubbleEl) rubbleEl.checked = false;
         const guardsEl = document.getElementById('setDisableGuards');
         if (guardsEl) guardsEl.checked = false;
+        const devMenuEl = document.getElementById('setDevMenu');
+        if (devMenuEl) devMenuEl.checked = false;
+        setDevMenuButtonVisible(false);
         if (templateLevelInputEl) templateLevelInputEl.checked = false;
         if (bridge2LevelInputEl) bridge2LevelInputEl.checked = false;
         if (bridgeDevLevelInputEl) bridgeDevLevelInputEl.checked = false;
@@ -17255,25 +19890,30 @@ setWaterFxInputsFromRuntimeState();
         bridgeDevLevelEnabled = false;
         setFpsCounterEnabled(false);
         setDevWaterFxEnabled(true);
-        applyWaterFxFromSettingsUi(false);
+        // Boot-time, outside any try: a throw here aborts the module and the
+        // difficulty cards never render, which looks like "the game won't start".
+        try { applyWaterFxFromSettingsUi(false); }
+        catch (err) { console.error('water FX init (defaults) failed:', err); }
         return;
     }
     try {
         const o = JSON.parse(s);
         if (o.sg  != null) { document.getElementById('setSg').value  = o.sg;  AMMO_START[0] = Math.max(0, o.sg|0); }
         if (o.cb  != null) { document.getElementById('setCb').value  = o.cb;  AMMO_START[1] = Math.max(0, o.cb|0); }
-        if (o.cimp != null) {
-            const cimp = Math.min(500, Math.max(1, o.cimp|0));
-            cannonImpactScale = cimp;
-            if (cannonImpactInput) cannonImpactInput.value = String(cimp);
-            if (cannonImpactValEl) cannonImpactValEl.textContent = String(cimp);
-        }
         if (o.ex  != null) { document.getElementById('setEx').value  = o.ex;  AMMO_START[2] = Math.max(0, o.ex|0); }
         if (o.mo  != null) { document.getElementById('setMo').value  = o.mo;  AMMO_START[3] = Math.max(0, o.mo|0); }
         if (o.mg  != null) { document.getElementById('setMg').value  = o.mg;  AMMO_START[4] = Math.max(0, o.mg|0); }
         if (o.sn  != null) { document.getElementById('setSn').value  = o.sn;  AMMO_START[5] = Math.max(0, o.sn|0); }
         if (o.npc != null) { document.getElementById('setNpc').value = o.npc; }
         if (o.inv != null) { document.getElementById('setInvertMouse').checked = o.inv; invertMouse = !!o.inv; }
+        // Absent key means "never turned on", so this defaults to hidden for
+        // everyone with existing saved settings, not just for a fresh profile.
+        {
+            const devOn = !!o.dev;
+            const devMenuEl = document.getElementById('setDevMenu');
+            if (devMenuEl) devMenuEl.checked = devOn;
+            setDevMenuButtonVisible(devOn);
+        }
         if (o.bc  != null) { document.getElementById('setBallCam').checked       = o.bc;  ballCamAuto = !!o.bc; }
         else {
             const bcEl = document.getElementById('setBallCam');
@@ -17312,6 +19952,15 @@ setWaterFxInputsFromRuntimeState();
         }
         if (o.wop != null && waterOpacityInputEl) {
             waterOpacityInputEl.value = String(clampInt(o.wop, 20, 100, Math.round(waterFxOpacity * 100)));
+        }
+        if (o.wmd != null && waterModeInputEl) {
+            waterModeInputEl.value = String(clampInt(o.wmd, 0, WATER_MODE_COUNT - 1, waterSurfaceMode));
+        }
+        if (o.rsp != null && rippleSpeedInputEl) {
+            rippleSpeedInputEl.value = String(clampInt(o.rsp, 40, 400, Math.round(rippleWaveSpeedMps * 100)));
+        }
+        if (o.rlf != null && rippleLifeInputEl) {
+            rippleLifeInputEl.value = String(clampInt(o.rlf, 10, 80, Math.round(rippleLifeSec * 10)));
         }
         if (o.wir != null && waterImpactsInputEl) {
             waterImpactsInputEl.checked = !!o.wir;
@@ -17424,7 +20073,10 @@ setWaterFxInputsFromRuntimeState();
         ballCamAuto = false;
     }
 
-    applyWaterFxFromSettingsUi(false);
+    // Same reasoning as the defaults path above: never let a water setting
+    // abort module evaluation before the menu is built.
+    try { applyWaterFxFromSettingsUi(false); }
+    catch (err) { console.error('water FX init (saved settings) failed:', err); }
 
     applyGuardDisableMode();
 })();
@@ -17504,13 +20156,6 @@ initEditor({
 document.addEventListener('click', () => {
     if (settingsPanel.style.display === 'block') settingsPanel.style.display = 'none';
 });
-if (cannonImpactInput) {
-    cannonImpactInput.addEventListener('input', e => {
-        const v = Math.min(500, Math.max(1, parseInt(e.target.value) || 170));
-        cannonImpactScale = v;
-        if (cannonImpactValEl) cannonImpactValEl.textContent = String(v);
-    });
-}
 // Auto ball-cam toggle applies live (no restart needed)
 document.getElementById('setBallCam').addEventListener('change', e => {
     ballCamAuto = e.target.checked;
@@ -17520,6 +20165,18 @@ document.getElementById('setBallCam').addEventListener('change', e => {
         localStorage.setItem('castleSettings', JSON.stringify(o));
     } catch (err) {}
 });
+// Dev menu button toggle applies live and persists (no restart needed)
+const devMenuInputEl = document.getElementById('setDevMenu');
+if (devMenuInputEl) {
+    devMenuInputEl.addEventListener('change', e => {
+        setDevMenuButtonVisible(e.target.checked);
+        try {
+            const o = JSON.parse(localStorage.getItem('castleSettings') || '{}');
+            o.dev = devMenuButtonEnabled;
+            localStorage.setItem('castleSettings', JSON.stringify(o));
+        } catch (err) {}
+    });
+}
 // FPS debug overlay toggle applies live (no restart needed)
 document.getElementById('setFpsCounter').addEventListener('change', e => {
     const enabled = e.target.checked;
@@ -17582,6 +20239,14 @@ if (waterColorInputEl) {
 if (waterOpacityInputEl) {
     waterOpacityInputEl.addEventListener('input', () => applyWaterFxFromSettingsUi(true));
     waterOpacityInputEl.addEventListener('change', () => applyWaterFxFromSettingsUi(true));
+}
+if (waterModeInputEl) {
+    waterModeInputEl.addEventListener('change', () => applyWaterFxFromSettingsUi(true));
+}
+for (const el of [rippleSpeedInputEl, rippleLifeInputEl]) {
+    if (!el) continue;
+    el.addEventListener('input', () => applyWaterFxFromSettingsUi(false));
+    el.addEventListener('change', () => applyWaterFxFromSettingsUi(true));
 }
 if (waterImpactsInputEl) {
     waterImpactsInputEl.addEventListener('change', () => applyWaterFxFromSettingsUi(true));
@@ -17758,7 +20423,6 @@ document.getElementById('applySettings').addEventListener('click', () => {
     const prevTownLevelEnabled = townLevelEnabled;
     const sg  = Math.max(0, parseInt(document.getElementById('setSg').value)  || 0);
     const cb  = Math.max(0, parseInt(document.getElementById('setCb').value)  || 0);
-    const cimp = Math.min(500, Math.max(1, parseInt(document.getElementById('setCannonImpact').value) || 170));
     const ex  = Math.max(0, parseInt(document.getElementById('setEx').value)  || 0);
     const mo  = Math.max(0, parseInt(document.getElementById('setMo').value)  || 0);
     const mg  = Math.max(0, parseInt(document.getElementById('setMg').value)  || 0);
@@ -17778,11 +20442,16 @@ document.getElementById('applySettings').addEventListener('click', () => {
     const slw = document.getElementById('setSlowMo').checked;
     const snd = document.getElementById('setSound').checked;
     const rub = document.getElementById('setRubbleSound').checked;
+    // APPLY & RESTART rewrites the whole settings object below rather than
+    // merging, so every persisted key has to be gathered here or it is silently
+    // dropped. This one is easy to miss because the toggle also saves itself.
+    const dev = devMenuInputEl ? devMenuInputEl.checked : devMenuButtonEnabled;
     const { wcl, wop, wir, wrs, wrz, wrl } = readWaterFxFromSettingsUi();
     invertMouse = inv;
     ballCamAuto = bc;
     setFpsCounterEnabled(fps);
     setPerfDebugEnabled(pd);
+    setDevMenuButtonVisible(dev);
     setGrassTextureEnabled(gtx);
     setDevWaterFxEnabled(wfx);
     waterFxColor = wcl;
@@ -17803,10 +20472,8 @@ document.getElementById('applySettings').addEventListener('click', () => {
     soundEnabled = snd;
     rubbleSoundEnabled = rub;
     if (!rubbleSoundEnabled) masonryRumbleLevel = 0;
-    cannonImpactScale = cimp;
-    if (cannonImpactValEl) cannonImpactValEl.textContent = String(cimp);
     AMMO_START[0] = sg; AMMO_START[1] = cb; AMMO_START[2] = ex; AMMO_START[3] = mo; AMMO_START[4] = mg; AMMO_START[5] = sn;
-    localStorage.setItem('castleSettings', JSON.stringify({ sg, cb, cimp, ex, mo, mg, sn, npc, inv, bc, fps, pd, gtx, wfx, wcl, wop, wir, wrs, wrz, wrl, dis, gds, tpl, br2, twn, slw, snd, rub }));
+    localStorage.setItem('castleSettings', JSON.stringify({ sg, cb, ex, mo, mg, sn, npc, inv, bc, fps, pd, dev, gtx, wfx, wcl, wop, wir, wrs, wrz, wrl, dis, gds, tpl, br2, twn, slw, snd, rub }));
     p1Ammo = [...AMMO_START]; p2Ammo = [...AMMO_START];
     score = 0; bricksDestroyed = 0; shotsFired = 0;
     bestShotDamage = 0;
@@ -17814,7 +20481,7 @@ document.getElementById('applySettings').addEventListener('click', () => {
     gameOver = false; gameOverPending = false; gameOverPendingAt = 0; gameOverCalmSec = 0; _npcAggroTriggered = false; _hutChargerTriggered = false;
     resetPlayerWaterState(false);
     _npcKillCount = 0; _npcWorldAnger = 0;
-    playerHits = 0; updateHearts();
+    playerHits = 0; playerMaxHearts = PLAYER_HEART_BASE; updateHearts();
     document.getElementById('gameOver').style.display = 'none';
     settingsPanel.style.display = 'none';
     updateUI(); updateP2UI();
@@ -17850,34 +20517,56 @@ const DIFFICULTIES = {
     squire: {
         name: 'Squire', emoji: '\uD83D\uDEE1\uFE0F',
         blurb: 'A gentle siege. The lone guard is unarmed and won\u2019t fight back \u2014 plenty of ammo to learn your aim.',
-        ammo: [24, 20, 6, 4, 400, 8, 0, 0, 0], knights: 1, disarm: true,
+        ammo: [24, 20, 6, 4, 400, 8, 0, 0, 0, 0, 0, 0], knights: 1, disarm: true,
         c1: '#34d399', c2: '#0f9b6c'
     },
     knight: {
         name: 'Knight', emoji: '\u2694\uFE0F',
         blurb: 'The classic challenge. Armed defenders, a small war-band of three, and a standard supply of ammunition.',
-        ammo: [12, 10, 3, 2, 200, 5, 0, 0, 0], knights: 3, disarm: false,
+        ammo: [12, 10, 3, 2, 200, 5, 0, 0, 0, 0, 0, 0], knights: 3, disarm: false,
         c1: '#f1c40f', c2: '#b8860b'
     },
     warlord: {
         name: 'Warlord', emoji: '\uD83D\uDC80',
         blurb: 'Brutal. A full company of eight armed knights storms out and ammo is scarce. Make every shot count.',
-        ammo: [8, 6, 2, 1, 120, 4, 0, 0, 0], knights: 8, disarm: false,
+        ammo: [8, 6, 2, 1, 120, 4, 0, 0, 0, 0, 0, 0], knights: 8, disarm: false,
         c1: '#ef4444', c2: '#991b1b'
     },
     modern: {
         name: 'Modern Warfare', emoji: '\uD83C\uDF96\uFE0F',
-        blurb: 'Ditch the catapults. Three FPV strike drones, a precision sniper, 300 minigun rounds, four bouncing grenades and two cluster bombs. Six armed defenders await.',
-        ammo: [0, 0, 0, 0, 300, 8, 3, 4, 2], knights: 6, disarm: false,
+        blurb: 'You deploy with your bare hands and a black belt — knife-hand chop and front kick, both unlimited. Everything else arrives by air: a dark green AC-130 scatters the arsenal downwind across the whole map, automatic rifle first, with medical crates in among it. A minigun rides along on one run in five. Go and find the crates, or keep kicking. Six armed defenders await.',
+        // Only the karate chop, and it never runs out. Everything below is
+        // delivered by airdropPool instead of being handed over at spawn.
+        ammo: [0, 0, 0, 0, 0, 0, 0, 0, 0, Infinity, Infinity, 0], knights: 6, disarm: false,
+        // Delivered one crate per AC-130 pass (two on the first run). The
+        // minigun leads so the player is not chopping for the whole opening.
+        airdropPool: [
+            { weapon: WEAPON_IDX_RIFLE,   amount: 150 },
+            // Rare. The minigun trivialises the whole stage once it lands,
+            // so most runs never see it and have to make the rifle work.
+            { weapon: WEAPON_IDX_MINIGUN, amount: 300, chance: 0.20 },
+            { kind: 'heart' },
+            { weapon: WEAPON_IDX_SNIPER,  amount: 8 },
+            { weapon: WEAPON_IDX_GRENADE, amount: 4 },
+            { weapon: WEAPON_IDX_DRONE,   amount: 3 },
+            { kind: 'heart' },
+            { weapon: WEAPON_IDX_CLUSTER, amount: 2 },
+        ],
+        // Unlimited melee means ammo can never run out, so the ammo-exhaustion
+        // end condition can never fire. The objective becomes the defenders,
+        // exactly as it already is in Extreme Destruction.
+        killWin: true,
         c1: '#22d3ee', c2: '#0c4a6e', wide: true,
-        statsLine: 'Minigun \u00d7300 \u00b7 Sniper \u00d78 \u00b7 FPV Drone \u00d73 \u00b7 Grenade \u00d74 \u00b7 Cluster \u00d72'
+        statsLine: 'Karate Chop \u221e \u00b7 Mae Geri \u221e \u00b7 airdropped: Rifle \u00d7150 \u00b7 Sniper \u00d78 \u00b7 Grenade \u00d74 \u00b7 Drone \u00d73 \u00b7 Cluster \u00d72 \u00b7 2 medical \u00b7 Minigun 1-in-5'
     },
     extreme: {
         name: 'Extreme Destruction', emoji: '\uD83D\uDCA5',
-        blurb: 'Every weapon. No limits. Cannons, explosives, mortars, minigun, sniper, drones, grenades, cluster bombs — the lot. Twelve armed defenders. Game ends when the last one falls.',
-        ammo: [60, 80, 30, 20, 2000, 20, 4, 8, 4], knights: 12, disarm: false,
+        blurb: 'Every weapon. No limits. Cannons, explosives, mortars, minigun, sniper, drones, grenades, cluster bombs and a black belt — the lot. Twelve armed defenders. Game ends when the last one falls.',
+        // "Every weapon" now includes the melee. Extreme is already killWin, so
+        // an unlimited slot changes nothing about how the round ends here.
+        ammo: [60, 80, 30, 20, 2000, 20, 4, 8, 4, Infinity, Infinity, 240], knights: 12, disarm: false,
         c1: '#a855f7', c2: '#6b21a8', wide: true, killWin: true,
-        statsLine: 'Cannon \u00d780 \u00b7 Explosive \u00d730 \u00b7 Mortar \u00d720 \u00b7 Minigun \u00d72000 \u00b7 Sniper \u00d720 \u00b7 Drone \u00d74 \u00b7 Grenade \u00d78 \u00b7 Cluster \u00d74'
+        statsLine: 'Cannon \u00d780 \u00b7 Explosive \u00d730 \u00b7 Mortar \u00d720 \u00b7 Minigun \u00d72000 \u00b7 Sniper \u00d720 \u00b7 Drone \u00d74 \u00b7 Grenade \u00d78 \u00b7 Cluster \u00d74 \u00b7 Melee \u221e'
     }
 };
 const DIFF_ORDER = ['squire', 'knight', 'warlord', 'modern', 'extreme'];
@@ -17910,8 +20599,8 @@ let _npcWorldAnger = 0;
 const difficultyModal = document.getElementById('difficultyModal');
 const dmGrid = document.getElementById('dmGrid');
 let dmMode = '1p';   // '1p' or '2p' selection in the modal
-let dmStory = 'classic'; // 'story' or 'classic' selection in the modal � classic (new levels) is the default
-let dmLevel = 'bridge'; // 'bridge' or 'castle' for classic mode
+let dmStory = 'story';   // 'story' or 'classic' selection in the modal — the story campaign is the default
+let dmLevel = 'town';   // 'town', 'bridge' or 'castle' for classic mode
 if (touchControls.enabled) {
     dmMode = '1p';
     const dmHint = document.getElementById('dmModeHint');
@@ -18056,14 +20745,20 @@ function startGameWithDifficulty(key) {
     _townBackupTriggered = false;
     resetPlayerWaterState();
     _npcKillCount = 0; _npcWorldAnger = 0;
-    playerHits = 0; updateHearts();
+    playerHits = 0; playerMaxHearts = PLAYER_HEART_BASE; updateHearts();
     document.getElementById('gameOver').style.display = 'none';
     // Multiplayer is temporarily disabled.
     setTwoPlayerMode(false);
     storyModePreference = dmMode === '1p' && dmStory === 'story';
     levelPreference = (dmLevel === 'bridge' || dmLevel === 'town') ? dmLevel : 'castle';
+    // Arm (or clear) the AC-130 resupply schedule for this difficulty. Must
+    // run before setWeapon so the opening HUD line is not immediately replaced.
+    armAirdropForDifficulty(key);
     updateUI(); updateP2UI();
-    setWeapon(0);
+    // setWeapon skips slots with zero ammo, so in Modern Warfare (where only
+    // the karate slot is non-zero) index 0 already lands on the chop. Naming it
+    // makes that intentional rather than incidental.
+    setWeapon(d.ammo[WEAPON_IDX_KARATE] && !d.ammo[0] ? WEAPON_IDX_KARATE : 0);
     // Spawn extra courtyard knights to reach the difficulty's count.
     const existing = npcList.filter(n => !n.isTowerGuard).length;
     const toAdd = d.knights - existing;
@@ -18091,6 +20786,7 @@ try {
     renderDifficultyCards();
 } catch (e) {
     console.error('renderDifficultyCards failed:', e);
+    showBootError('renderDifficultyCards failed', (e && e.stack) ? e.stack : String(e));
 }
 updateDmStoryUi();
 updateDmLevelUi();
@@ -18148,9 +20844,17 @@ window.addEventListener("keydown", e => {
     if (e.code === "Escape") {
         if (pointerLocked) {
             document.exitPointerLock(); // pause handled by pointerlockchange
-        } else if (_gameStarted && !gameOver) {
-            settingsPanel.style.display = settingsPanel.style.display === 'block' ? 'none' : 'block';
+        } else if (settingsPanel.style.display === 'block') {
+            settingsPanel.style.display = 'none';
+        } else if (_gameStarted && !gameOver && performance.now() - _lastPointerUnlockAt > 500) {
+            returnToMenu();
         }
+        e.preventDefault();
+        return;
+    }
+    if (!window.__editorActive && e.code === "KeyR" && currentWeapon === WEAPON_IDX_RIFLE
+            && hasPrimaryPlayerInputCapture()) {
+        startRifleReload();
         e.preventDefault();
         return;
     }
@@ -18164,6 +20868,7 @@ window.addEventListener("keyup", e => {
 });
 
 window.addEventListener("wheel", e => {
+    if (!hasPrimaryPlayerInputCapture()) return;  // menus/panels keep their scroll
     e.preventDefault();
     adjustPower(e.deltaY < 0 ? +5 : -5);
 }, { passive: false });
@@ -18185,6 +20890,7 @@ window.addEventListener("resize", () => {
 const clock = new THREE.Clock();
 let _frameCount = 0;  // used for throttled support checks
 let _lastDisturbFrame = -9999;  // last frame any brick was awake (gates cluster check)
+let _lastAwakeBrickCount = 0;   // previous frame's awake masonry count (scales solver work)
 let _mobilePerfEmergency = false;
 let _mobilePerfBadSec = 0;
 let _mobilePerfGoodSec = 0;
@@ -18200,6 +20906,10 @@ const _WAKE_PROP_DY_MAX = 0.85;  // ... up to one course up (brick is 0.5 m tall
 const _WAKE_PROP_MOVE2 = 0.25;   // (0.5 m/s)� � ignore tiny settling jitter
 const _WAKE_PROP_INTERVAL = isMobileProfile ? 12 : 6;   // mobile: halve scan rate to cut first-impact spikes
 const _WAKE_PROP_BUDGET = isMobileProfile ? 16 : 40;    // mobile: tighter wake budget bounds worst-case cost
+// PERF: hard cap on how many moving-brick source points feed the propagation
+// cross product below. In a large collapse this list grew with the awake set,
+// so the pass cost scaled as (sleeping x awake). 4 numbers per point.
+const _WAKE_PROP_MAX_PTS = 4 * (isMobileProfile ? 120 : 400);
 const _awakeBrickPts   = [];
 function getWakePropagationInterval() {
     if (lightweightRubbleMode) return isMobileProfile ? 34 : 16;
@@ -18377,6 +21087,14 @@ let _perfDbgContacts = 0;
 let _perfDbgConstraints = 0;
 let _perfDbgWaterMs = 0;
 let _perfDbgBridgeAiMs = 0;
+// Structural-scan cost (unsupported-brick + lintel + cluster-topple passes).
+// These run OUTSIDE perfDebugMarkPhysics, which wraps only world.step, so
+// before this counter existed they were only visible as "frame is high while
+// phys is flat". Needed to measure making the scans level-aware.
+let _perfDbgScanMs = 0;
+let _perfDbgScanTicks = 0;
+let _perfDbgScanBricks = 0;
+let _perfDbgScanRole = '-';
 const _PERF_SPIKE_EVENT_MAX = 14;
 const _PERF_SPIKE_COOLDOWN_MS = 2500;
 let _perfSpikeEvents = [];
@@ -18451,9 +21169,11 @@ function collectWorldPhysicsStats() {
         if (b.sleepState === 0) dynAwake++;
         else dynSleep++;
     }
-    const contacts = world.narrowphase && world.narrowphase.contactEquations
-        ? world.narrowphase.contactEquations.length
-        : 0;
+    // cannon-es keeps the solved contact list on world.contacts. There is no
+    // narrowphase.contactEquations in 0.20 (the identifier appears nowhere in
+    // the library), so the old read was always undefined and this counter has
+    // been silently printing 0 since it was added.
+    const contacts = world.contacts ? world.contacts.length : 0;
     const constraints = world.constraints ? world.constraints.length : 0;
     return { dynAwake, dynSleep, dynTotal, contacts, constraints };
 }
@@ -18506,6 +21226,8 @@ function resetPerfDebugStats() {
     _perfDbgPhysicsMs = 0;
     _perfDbgRenderMs = 0;
     _perfDbgBroadphaseMs = 0;
+    _perfDbgSubsteps = 0;
+    _perfDbgPairs = 0;
     _perfDbgFrameMs = 0;
     _perfDbgAwakeBricks = 0;
     _perfDbgBodies = 0;
@@ -18522,6 +21244,9 @@ function resetPerfDebugStats() {
     _perfDbgConstraints = 0;
     _perfDbgWaterMs = 0;
     _perfDbgBridgeAiMs = 0;
+    _perfDbgScanMs = 0;
+    _perfDbgScanTicks = 0;
+    _perfDbgScanBricks = 0;
 }
 
 const _ciRaycaster = new THREE.Raycaster();
@@ -18625,6 +21350,16 @@ function perfDebugMarkBridgeAi(ms) {
     _perfDbgBridgeAiMs += ms;
 }
 
+// One tick of the structural scans (support/lintel or cluster-topple).
+// `bricksWalked` records the size of the list that tick scanned, so the
+// overlay can show which level's masonry is actually being scanned.
+function perfDebugMarkScan(ms, bricksWalked) {
+    if (!_perfDebugEnabled) return;
+    _perfDbgScanMs += ms;
+    _perfDbgScanTicks++;
+    _perfDbgScanBricks += (bricksWalked || 0);
+}
+
 function perfDebugMarkFrame(rawDt, awakeBricks, supportScanRan) {
     if (!_perfDebugEnabled) return;
     ensurePerfDebugOverlay();
@@ -18655,6 +21390,10 @@ function perfDebugMarkFrame(rawDt, awakeBricks, supportScanRan) {
     const avgBroadphase = _perfDbgBroadphaseMs / _perfDbgFrames;
     const avgWater = _perfDbgWaterMs / _perfDbgFrames;
     const avgBridgeAi = _perfDbgBridgeAiMs / _perfDbgFrames;
+    // Scan cost is reported as ms/frame (amortised over the window, so it is
+    // directly comparable with phys/render) plus the raw tick count.
+    const avgScan = _perfDbgScanMs / _perfDbgFrames;
+    const avgScanBricks = _perfDbgScanTicks ? Math.round(_perfDbgScanBricks / _perfDbgScanTicks) : 0;
     const avgAwake = Math.round(_perfDbgAwakeBricks / _perfDbgFrames);
     const avgBodies = Math.round(_perfDbgBodies / _perfDbgFrames);
     const avgBalls = (_perfDbgBalls / _perfDbgFrames).toFixed(1);
@@ -18702,8 +21441,8 @@ function perfDebugMarkFrame(rawDt, awakeBricks, supportScanRan) {
     _perfDbgEl.textContent =
 `fps ${avgFps.toFixed(1)} | frame ${avgFrame.toFixed(1)}ms\n` +
 `phys ${avgPhys.toFixed(1)}ms | render ${avgRender.toFixed(1)}ms\n` +
-`broadphase ${avgBroadphase.toFixed(1)}ms (${_broadphaseMode})\n` +
-`waterAnim ${avgWater.toFixed(1)}ms | bridgeAI ${avgBridgeAi.toFixed(1)}ms\n` +
+`broadphase ${avgBroadphase.toFixed(1)}ms (${_broadphaseMode}) | substeps ${(_perfDbgSubsteps / Math.max(1, _perfDbgFrames)).toFixed(2)}/frame | pairs ${Math.round(_perfDbgPairs / Math.max(1, _perfDbgFrames))}\n` +
+`waterAnim ${avgWater.toFixed(1)}ms | bridgeAI ${avgBridgeAi.toFixed(1)}ms | scan ${avgScan.toFixed(2)}ms (${_perfDbgScanTicks} ticks, ${avgScanBricks} bricks/tick, role ${_perfDbgScanRole})\n` +
 `awake ${avgAwake} | bodies ${avgBodies} | balls ${avgBalls} | ragdolls ${avgRagdolls}\n` +
 `dyn ${avgDynTotal} | dynAwake ${avgDynAwake} | dynSleep ${avgDynSleep}\n` +
 `storyBodies bridge ${roleStats.bridgeAttached}/${roleStats.bridgeAttached + roleStats.bridgeDetached} | castle ${roleStats.castleAttached}/${roleStats.castleAttached + roleStats.castleDetached}\n` +
@@ -18740,7 +21479,7 @@ function ensureFpsBadge() {
     el.id = 'tempFpsBadge';
     el.style.position = 'fixed';
     el.style.top = '13px';
-    el.style.right = '204px'; // sits inline to the left of the dev-menu button
+    el.style.right = fpsBadgeRightPx();
     el.style.height = '36px';
     el.style.boxSizing = 'border-box';
     el.style.display = 'inline-flex';
@@ -18964,8 +21703,17 @@ const NPC_TRIP_CHECK_JITTER = 0.22;
 const NPC_TRIP_RADIUS = 0.95;
 const NPC_TRIP_RUBBLE_MIN_SCORE = 2.4;
 const NPC_TRIP_BASE_CHANCE = 0.22;
-const NPC_MAX_STEP_UP = 0.32;
-const NPC_CLIMB_RATE = 0.85;
+// A brick course is BS.h = 1.0 m tall. At the old 0.32 a walker could never
+// mount a single course, so any rubble face was an impassable wall to them.
+const NPC_MAX_STEP_UP = 1.15;
+const NPC_CLIMB_RATE = 0.85;        // ~1.2 s to haul up one course: a scramble, not a hop
+// Fraction of this frame's ground speed kept while mounting a step. Low enough
+// that climbing visibly costs them momentum.
+const NPC_CLIMB_ADVANCE = 0.35;
+// Faces steeper than one step: hold, then commit to a slow haul-up rather than
+// refusing forever. A knight that simply stops dead at rubble reads as broken.
+const NPC_CLAMBER_COMMIT_SEC = 0.65;
+const NPC_CLAMBER_RATE = 1.10;
 const NPC_CRAWL_TRIGGER_STUCK = 0.36;
 const NPC_CRAWL_DEBRIS_SCORE_MIN = 2.2;
 const NPC_CRAWL_SPEED_SCALE = 0.5;
@@ -19142,6 +21890,10 @@ function updateNpcPanicSwim(npc, dt) {
 // Lightweight NPC-vs-solid collision resolver for standing/walking guards.
 // Bricks deliberately ignore CGROUP_NPC in cannon-es to keep NPCs from pushing
 // walls, so we do a cheap kinematic push-out here to stop visual clipping.
+// Helmet top of a standing NPC sits at ~2.0 m above its feet; anything whose
+// underside clears this can be walked under.
+const NPC_HEAD_CLEAR_Y = 1.95;
+
 function resolveNpcSolidCollision(np, footY, r = 0.34) {
     let bestPushX = 0;
     let bestPushZ = 0;
@@ -19191,6 +21943,14 @@ function resolveNpcSolidCollision(np, footY, r = 0.34) {
             if (ay > hy) hy = ay;
             if (az > hz) hz = az;
         }
+
+        // Overhead clearance. The push test below is purely 2D, so a brick
+        // whose underside is above the walker's head was still treated as a
+        // solid wall at ground level � which meant a door lintel, an arch, or
+        // the masonry course spanning a doorway sealed the opening and nobody
+        // could ever walk through it. Anything overhead is walked under.
+        const bBottom = b.body.aabb ? b.body.aabb.lowerBound.y : (bp.y - hy);
+        if (bBottom >= np.y + NPC_HEAD_CLEAR_Y) continue;
 
         const vv = b.body.velocity;
         const speed2 = vv ? (vv.x * vv.x + vv.y * vv.y + vv.z * vv.z) : 0;
@@ -19427,11 +22187,1573 @@ function applyPlayerXZMove(move) {
     }
 }
 
+// ===========================================================================
+// ===========================================================================
+// === MELEE: KARATE CHOP + MAE GERI =========================================
+// ===========================================================================
+// Two hand-to-hand strikes in a game built entirely around projectiles. They
+// share one state machine and one impact resolver; everything that differs
+// between them lives in the profile objects up with the viewmodels
+// (MELEE_KARATE / MELEE_MAEGERI), so adding a third strike is a data change.
+//
+// A swing is a list of phases. Each eases the rig from one named pose to the
+// next, and exactly one phase is the strike, carrying the single impact frame.
+// Nothing here touches fireCannonball: no projectile, no cannonballs[] entry,
+// no ammo decrement.
+
+// Ease a pose object toward another, writing into a scratch object so a swing
+// allocates nothing per frame.
+function lerpMeleePose(a, b, k, out) {
+    for (const key in a) out[key] = a[key] + (b[key] - a[key]) * k;
+    return out;
+}
+
+// Put a rig back in its rest pose. Also called when the weapon is selected, so
+// switching to it mid-anything shows a clean stance.
+function resetMeleePose(profile) {
+    if (!profile) return;
+    meleeLungeZ = 0;
+    profile.applyPose(profile.poses[profile.phases[profile.phases.length - 1].to]);
+    profile.group.position.copy(profile.homePos);
+    profile.group.rotation.copy(profile.homeRot);
+    const trail = meleeTrailFor(profile);
+    if (trail) trail.material.opacity = 0;
+}
+
+// Both strikes draw a motion cue during their strike window. Which mesh that
+// is depends on the profile; everything about driving it is shared.
+function meleeTrailFor(profile) {
+    if (profile === MELEE_KARATE) return _karateTrail;
+    if (profile === MELEE_MAEGERI) return _maeGeriTrail;
+    return null;
+}
+
+// The chop's swipe ribbon: a flat arc that fades in only during the strike, so
+// the eye reads the path the hand took. Built on first use, not at module scope.
+function ensureKarateTrail() {
+    if (_karateTrail) return _karateTrail;
+    const geo = new THREE.RingGeometry(0.30, 0.46, 16, 1, Math.PI * 0.15, Math.PI * 0.85);
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0xfdf6e0, transparent: true, opacity: 0,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(0, 0, -0.24);
+    m.rotation.set(0, Math.PI / 2, 0);
+    vmKarateShoulder.add(m);
+    _karateTrail = m;
+    return m;
+}
+
+// The kick's wake: a hollow cone with its tip at the ball of the foot, flaring
+// back up the shin. Parented to the ankle, so it points wherever the foot
+// points and stretches along the line of the thrust.
+function ensureMaeGeriTrail() {
+    if (_maeGeriTrail) return _maeGeriTrail;
+    const geo = new THREE.ConeGeometry(0.105, 0.40, 10, 1, true);
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0xfdf3dc, transparent: true, opacity: 0,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    // ConeGeometry points along +Y with its tip at +height/2. Flipping it puts
+    // the tip at the foot (the chain runs along -Y) with the flare trailing
+    // back toward the knee.
+    m.rotation.x = Math.PI;
+    m.position.set(0, 0.14, -0.09);
+    vmMaeGeriAnkle.add(m);
+    _maeGeriTrail = m;
+    return m;
+}
+
+function startMeleeSwing() {
+    if (gameOver || gamePaused) return;
+    const profile = meleeProfileFor(currentWeapon);
+    if (!profile) return;
+    if (meleeSwinging || meleeCooldown > 0) return;
+    meleeSwinging = true;
+    meleeSwingT = 0;
+    meleeImpactDone = false;
+    meleeActiveWeapon = currentWeapon;
+    shotsFired++;
+    updateUI();
+    markSfxCombatActivity();
+    perfRecordEvent('shot', 'w' + currentWeapon);
+    if (profile === MELEE_KARATE) ensureKarateTrail();
+    if (profile === MELEE_MAEGERI) ensureMaeGeriTrail();
+    playMeleeKiai(profile);
+}
+
+// Drives the pose, the FOV punch and the single impact frame. Called every
+// frame regardless of the selected weapon, so a FOV offset left over from a
+// swing unwinds cleanly if the player switches away mid-strike.
+function updateMelee(dt) {
+    if (meleeCooldown > 0) meleeCooldown = Math.max(0, meleeCooldown - dt);
+    if (meleeComboCount > 0 && performance.now() > meleeComboExpiresAt) meleeComboCount = 0;
+
+    const profile = meleeProfileFor(currentWeapon);
+    if (!profile || (meleeSwinging && meleeActiveWeapon !== currentWeapon)) {
+        if (meleeFovOffset !== 0) meleeFovOffset = 0;   // setWeapon already restored camera.fov
+        return;
+    }
+
+    if (!meleeSwinging) {
+        // Idle breathing, so the stance is not dead still.
+        const t = performance.now() * 0.001;
+        profile.group.position.y = profile.homePos.y + Math.sin(t * 1.7) * 0.006;
+        if (profile === MELEE_KARATE) vmKarateShoulder.rotation.z = Math.sin(t * 1.3) * 0.02;
+        if (profile === MELEE_MAEGERI) vmMaeGeriHip.rotation.x = -0.10 + Math.sin(t * 1.3) * 0.03;
+        if (meleeFovOffset !== 0) {
+            meleeFovOffset = Math.max(0, meleeFovOffset - dt * 40);
+            camera.fov = NORMAL_FOV - meleeFovOffset;
+            camera.updateProjectionMatrix();
+        }
+        return;
+    }
+
+    const prevT = meleeSwingT;
+    meleeSwingT += dt;
+
+    // --- walk the phase list ------------------------------------------------
+    // `from` starts at the rest pose (the last phase's destination), and each
+    // completed phase hands its destination on as the next phase's origin, so
+    // the whole swing is continuous by construction and the final frame lands
+    // exactly on the pose resetMeleePose() writes.
+    const phases = profile.phases;
+    const restKey = phases[phases.length - 1].to;
+    let acc = 0, fromKey = restKey, phase = null, local = 0;
+    for (let i = 0; i < phases.length; i++) {
+        if (meleeSwingT < acc + phases[i].dur || i === phases.length - 1) {
+            phase = phases[i];
+            local = Math.min(1, Math.max(0, (meleeSwingT - acc) / phases[i].dur));
+            break;
+        }
+        acc += phases[i].dur;
+        fromKey = phases[i].to;
+    }
+    // Swing-wide landmarks. The camera and trail are driven off the STRIKE
+    // WINDOW, not off the current phase: the mae geri has a re-chamber phase
+    // after its strike, and keying the FOV unwind to "time since this phase
+    // began" made it jump back to full punch when that phase started.
+    let total = 0, strikeEnd = 0, strikeDur = 0, strikeImpactAt = 1;
+    for (const ph of phases) {
+        total += ph.dur;
+        if (ph.strike) { strikeEnd = total; strikeDur = ph.dur; strikeImpactAt = ph.impactAt; }
+    }
+    const strikeStart = strikeEnd - strikeDur;
+
+    const k = phase.ease === 'in'
+        ? local * local                              // accelerating: the strike
+        : 1 - Math.pow(1 - local, phase.ease === 'out3' ? 3 : 2);
+    const pose = lerpMeleePose(profile.poses[fromKey], profile.poses[phase.to], k, _meleePose);
+
+    // Lunge eases from the previous phase's end value to this phase's.
+    const prevLunge = phases[phases.indexOf(phase) - 1]?.lunge ?? 0;
+    meleeLungeZ = prevLunge + (phase.lunge - prevLunge) * k;
+
+    // FOV: widen through the wind-up (the coil), punch in across the strike,
+    // then unwind over everything that follows. Combo count deepens the punch.
+    const punch = profile.fovPunch + meleeComboCount * 0.8;
+    if (meleeSwingT < strikeStart) {
+        meleeFovOffset = -profile.fovWiden * (meleeSwingT / Math.max(0.001, strikeStart));
+    } else if (meleeSwingT < strikeEnd) {
+        const sk = (meleeSwingT - strikeStart) / Math.max(0.001, strikeDur);
+        meleeFovOffset = -profile.fovWiden + (punch + profile.fovWiden) * (sk * sk);
+    } else {
+        const after = (meleeSwingT - strikeEnd) / Math.max(0.001, total - strikeEnd);
+        meleeFovOffset = punch * (1 - Math.min(1, after));
+    }
+
+    profile.applyPose(pose);
+
+    const trailMesh = meleeTrailFor(profile);
+    if (trailMesh) {
+        trailMesh.material.opacity =
+            meleeSwingT < strikeStart ? 0
+            : meleeSwingT < strikeEnd
+                ? 0.10 + 0.55 * ((meleeSwingT - strikeStart) / Math.max(0.001, strikeDur))
+                : 0.65 * Math.max(0, 1 - (meleeSwingT - strikeEnd) * 3.2);
+    }
+
+    camera.fov = NORMAL_FOV - meleeFovOffset;
+    camera.updateProjectionMatrix();
+
+    // --- the single impact frame -------------------------------------------
+    // Keyed to the swing timeline rather than to "we are currently inside the
+    // strike phase", so a long frame that steps clean over the strike window
+    // still lands the hit instead of silently swallowing it.
+    if (!meleeImpactDone && meleeSwingT >= strikeStart + strikeDur * strikeImpactAt) {
+        meleeImpactDone = true;
+        meleeStrikeImpact(profile);
+    }
+    // Whoosh as the limb starts moving, not on the button press.
+    if (prevT < strikeStart && meleeSwingT >= strikeStart) playMeleeWhoosh(profile);
+
+    if (meleeSwingT >= total) {
+        meleeSwinging = false;
+        meleeSwingT = 0;
+        meleeActiveWeapon = -1;
+        meleeCooldown = profile.cooldown;
+        resetMeleePose(profile);
+    }
+}
+
+// Spins a ragdoll as ONE rigid body rather than as a bag of independently
+// tumbling parts.
+//
+// This is the whole difference between a launch that reads as a launch and one
+// that reads as a nudge. The parts are joined by cannon constraints, so giving
+// each limb its own random angular velocity just hands the solver a pile of
+// contradictions and it cancels almost all of it within a step or two -- which
+// is exactly why the first version looked weak.
+//
+// Instead the ragdoll is treated as a rigid body rotating about its own centre:
+// every part gets the SAME angular velocity, plus the tangential linear
+// velocity that rotation implies at its own offset (v += omega x r). The
+// constraints agree with that motion, so nothing is fighting and the whole body
+// helicopters away intact.
+//
+// The axis is horizontal and perpendicular to the strike, so the body somersaults
+// forward, away from the player, with a little yaw mixed in so it is not a
+// perfectly flat cartwheel.
+function applyRagdollSpin(npc, profile, fwd) {
+    if (!profile.npcSpin || !npc.partBodies || !npc.partBodies.length) return;
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (const pb of npc.partBodies) {
+        if (!pb) continue;
+        cx += pb.position.x; cy += pb.position.y; cz += pb.position.z; n++;
+    }
+    if (!n) return;
+    cx /= n; cy /= n; cz /= n;
+
+    // Side axis = fwd x up, negated so the top of the body tumbles AWAY.
+    const h = Math.hypot(fwd.x, fwd.z) || 1;
+    const axX = fwd.z / h, axZ = -fwd.x / h;
+    // A dash of yaw so it corkscrews rather than cartwheeling in a flat plane.
+    const yaw = (Math.random() < 0.5 ? -1 : 1) * 0.35;
+    _spinOmega.set(axX, yaw, axZ).normalize();
+
+    // Cap the rate so the fastest extremity cannot tunnel. Cannon has no CCD
+    // for ragdoll parts, and world.step() always advances in fixed 1/60 s
+    // substeps regardless of frame rate, so the bound is per substep and does
+    // not get worse on a slow machine.
+    //
+    // The bound is NOT the ground: that is a 30 m thick slab and nothing is
+    // getting through it. It is thin masonry -- the narrowest plank is
+    // PS.d = 0.75 m, so staying under half of that (0.375 m per substep, i.e.
+    // 22.5 m/s) keeps a flying limb from passing through a bridge deck.
+    // 19 m/s leaves a comfortable margin at 0.32 m per substep.
+    let maxR = 0.001;
+    for (const pb of npc.partBodies) {
+        if (!pb) continue;
+        maxR = Math.max(maxR, Math.hypot(pb.position.x - cx, pb.position.y - cy, pb.position.z - cz));
+    }
+    const MAX_TANGENTIAL = 19;                       // m/s at the extremities
+    const omega = Math.min(profile.npcSpin, MAX_TANGENTIAL / maxR);
+    _spinOmega.multiplyScalar(omega);
+
+    for (const pb of npc.partBodies) {
+        if (!pb) continue;
+        _spinR.set(pb.position.x - cx, pb.position.y - cy, pb.position.z - cz);
+        // v += omega x r, so the part's linear motion matches the rotation the
+        // constraints are about to be asked to maintain.
+        pb.velocity.x += _spinOmega.y * _spinR.z - _spinOmega.z * _spinR.y;
+        pb.velocity.y += _spinOmega.z * _spinR.x - _spinOmega.x * _spinR.z;
+        pb.velocity.z += _spinOmega.x * _spinR.y - _spinOmega.y * _spinR.x;
+        // Same angular velocity on every part, plus a little jitter so limbs
+        // still flail instead of moving like a shop mannequin.
+        const j = profile.npcSpin * 0.12;
+        pb.angularVelocity.set(
+            _spinOmega.x + (Math.random() - 0.5) * j,
+            _spinOmega.y + (Math.random() - 0.5) * j,
+            _spinOmega.z + (Math.random() - 0.5) * j
+        );
+        // Stock ragdoll damping is tuned for a corpse settling, not for a man
+        // helicoptering over a wall. Loosen it so the spin actually survives.
+        if (profile.npcSpinDamp) {
+            pb.angularDamping = profile.npcSpinDamp.angular;
+            pb.linearDamping = profile.npcSpinDamp.linear;
+        }
+    }
+}
+
+// Resolves one strike against defenders, masonry and water. Everything inside a
+// sphere placed `reach` metres down the view axis is affected; the sphere sits
+// below the axis so strikes land on torsos and on the bottom courses of a wall
+// instead of over the top of them.
+function meleeStrikeImpact(profile) {
+    _karateFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const fwd = _karateFwd;
+    const cx = camera.position.x + fwd.x * profile.reach;
+    const cy = camera.position.y + fwd.y * profile.reach - profile.drop;
+    const cz = camera.position.z + fwd.z * profile.reach;
+    const R2 = profile.radius * profile.radius;
+    let hitNpc = 0, hitBricks = 0;
+
+    // --- defenders ----------------------------------------------------------
+    for (const npc of npcList) {
+        if (npc.isRagdoll || npc.storyDormant || !npc.group || !npc.group.visible) continue;
+        const nx = npc.group.position.x, nz = npc.group.position.z;
+        const ny = npc.group.position.y + 1.05;
+        const dx = nx - cx, dy = ny - cy, dz = nz - cz;
+        // NPC capsule is roughly 0.55 m across, so widen the test by that much.
+        const reach = profile.radius + 0.55;
+        if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
+
+        // Synthetic impactor: activateRagdoll only reads .velocity and
+        // .position off this, so a plain object is enough and avoids adding a
+        // throwaway body to the physics world.
+        const impactor = {
+            velocity: { x: fwd.x * 26, y: 6, z: fwd.z * 26 },
+            position: { x: cx, y: cy, z: cz },
+        };
+        spawnBlood(new THREE.Vector3(cx, cy, cz));
+        if (isMobileProfile) activateRagdollLite(npc, impactor, false);
+        else activateRagdoll(npc, impactor, false);
+
+        if (npc.partBodies) {
+            // Combo scaling is the Virtua Fighter bit: each connect in a chain
+            // adds launch, so chop -> chop -> mae geri sends them properly up.
+            const launch = profile.npcUp + meleeComboCount * profile.npcLaunchPerCombo;
+            // Sideways component, so a struck body arcs away rather than
+            // sliding down the view axis like a shunted crate.
+            const sideX = -fwd.z, sideZ = fwd.x;
+            for (const pb of npc.partBodies) {
+                if (!pb) continue;
+                const s = (Math.random() - 0.5) * 2 * profile.npcScatter;
+                pb.applyImpulse(
+                    new CANNON.Vec3(
+                        (fwd.x + sideX * s) * profile.npcLimb,
+                        launch * 0.35 * (0.6 + Math.random() * 0.8),
+                        (fwd.z + sideZ * s) * profile.npcLimb
+                    ),
+                    pb.position
+                );
+            }
+            if (npc.partBodies[0]) {
+                npc.partBodies[0].applyImpulse(
+                    new CANNON.Vec3(fwd.x * profile.npcTorso, launch, fwd.z * profile.npcTorso),
+                    npc.partBodies[0].position
+                );
+            }
+            applyRagdollSpin(npc, profile, fwd);
+        }
+        hitNpc++;
+        markNpcAngry(nx, nz, 0.5, 22);
+        const bonus = profile.killScore + meleeComboCount * 10;
+        score += bonus;
+        _npcKillCount++;
+        spawnScorePopup(nx, ny + 0.7, nz, `+${bonus} ${profile.hitLabel}`, 'kill big');
+        showHitMarker(true, false);
+        // No checkGameOver() here: activateRagdoll already runs it for killWin
+        // difficulties, which is every mode that grants a melee.
+    }
+
+    // --- masonry ------------------------------------------------------------
+    // The impulse is capped exactly the way triggerBlast caps blast impulses, so
+    // a strike cannot pump energy into a cascade across the whole structure.
+    for (const b of bricks) {
+        if (isBrickInInactiveStoryLevel(b)) continue;
+        if (b.body.mass <= 0) continue;
+        const dx = b.body.position.x - cx;
+        const dy = b.body.position.y - cy;
+        const dz = b.body.position.z - cz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > R2) continue;
+        const dist = Math.sqrt(d2) + 0.01;
+        const fall = 1 - dist / profile.radius;
+        const force = fall * profile.brickForce;
+        const mix = profile.brickRadialMix;
+        b.body.wakeUp();
+        b.body.applyImpulse(
+            new CANNON.Vec3(
+                fwd.x * force + (dx / dist) * force * mix,
+                -force * profile.brickDownBias + (dy / dist) * force * 0.20,
+                fwd.z * force + (dz / dist) * force * mix
+            ),
+            new CANNON.Vec3(
+                (Math.random() - 0.5) * BS.h,
+                (Math.random() - 0.5) * BS.h,
+                (Math.random() - 0.5) * BS.h
+            )
+        );
+        const v = b.body.velocity;
+        const spd2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        if (spd2 > 12 * 12) {
+            const s = 12 / Math.sqrt(spd2);
+            b.body.velocity.set(v.x * s, v.y * s, v.z * s);
+        }
+        const av = b.body.angularVelocity;
+        const aspd2 = av.x * av.x + av.y * av.y + av.z * av.z;
+        if (aspd2 > 7 * 7) {
+            const as = 7 / Math.sqrt(aspd2);
+            b.body.angularVelocity.set(av.x * as, av.y * as, av.z * as);
+        }
+        hitBricks++;
+    }
+
+    // --- water --------------------------------------------------------------
+    const wy = getWaterSurfaceYAtXZ(cx, cz);
+    if (wy != null && Math.abs(cy - wy) < profile.radius + 0.4) {
+        const rippleY = getWaterVisualSurfaceYAtXZ(cx, cz) ?? wy;
+        spawnWaterImpactRipple(cx, cz, rippleY, 4.5, getRippleRoleAtXZ(cx, cz));
+    }
+
+    // --- feedback -----------------------------------------------------------
+    const connected = hitNpc > 0 || hitBricks > 0;
+    if (connected) {
+        meleeComboCount = Math.min(9, meleeComboCount + 1);
+        meleeComboExpiresAt = performance.now() + 2600;
+        _lastImpactMs = performance.now();
+        _lastImpactPos.x = cx; _lastImpactPos.z = cz;
+        _karateHitPos.set(cx, cy, cz);
+
+        // Freeze-frame. Landing on a body is worth more than scuffing a wall,
+        // and a combo digs in harder, so the beat lengthens as a string builds.
+        const stop = profile.hitStop * (hitNpc > 0 ? 1 : 0.55)
+            * (1 + Math.min(4, meleeComboCount) * 0.14);
+        meleeHitStop = Math.max(meleeHitStop, stop);
+
+        // Impact flash. A short, tight, bright pop at the contact point picks
+        // the moment out even in daylight; it costs nothing because the light
+        // pool is permanent (see popFlash).
+        if (profile.flash > 0) {
+            popFlash(cx, cy, cz, hitNpc > 0 ? 0xfff0d0 : 0xffe0a0, profile.flash, 9, 110);
+        }
+        if (hitBricks > 0) {
+            spawnExplosion(_karateHitPos);           // stone dust
+            playImpact(Math.min(1, 0.55 + hitBricks * 0.05), 'stone');
+        }
+        if (hitNpc > 0) {
+            // Dust knocked off the body as well as the blood spray, so a clean
+            // connect has some bulk to it rather than a few red dots.
+            spawnExplosion(_karateHitPos);
+        }
+        playMeleeImpact(profile, hitNpc > 0);
+        addShake(profile.shake * (hitNpc > 0 ? 1 : 0.6)
+            * (1 + Math.min(4, meleeComboCount) * 0.10));
+        if (meleeComboCount >= 2) {
+            spawnScorePopup(cx, cy + 1.1, cz, `COMBO ×${meleeComboCount}`, 'kill');
+        }
+        updateUI();
+    } else {
+        meleeComboCount = 0;
+        addShake(0.06);
+    }
+}
+
+// --- melee audio ------------------------------------------------------------
+// Short, dry and percussive. `profile.whooshPitch` / `impactPitch` drop the kick
+// an octave-ish below the chop so the two strikes are audibly different.
+function playMeleeWhoosh(profile) {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const p = profile.whooshPitch;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(520 * p, now);
+    osc.frequency.exponentialRampToValueAtTime(120 * p, now + 0.16);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1500 * p, now);
+    bp.frequency.exponentialRampToValueAtTime(420 * p, now + 0.16);
+    bp.Q.value = 1.4;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.20, now + 0.025);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.19);
+    osc.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.22);
+}
+
+function playMeleeImpact(profile, onFlesh) {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const p = profile.impactPitch;
+    const heavy = profile.hitStop > 0.09;     // the kick, not the chop
+    // Body: a fast pitch-dropping sine gives the thump weight.
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime((onFlesh ? 190 : 260) * p, now);
+    sub.frequency.exponentialRampToValueAtTime(48 * p, now + 0.13);
+    const subG = ctx.createGain();
+    subG.gain.setValueAtTime(0.0001, now);
+    subG.gain.exponentialRampToValueAtTime(onFlesh ? 0.34 : 0.26, now + 0.008);
+    subG.gain.exponentialRampToValueAtTime(0.0001, now + 0.20);
+    sub.connect(subG); subG.connect(ctx.destination);
+    sub.start(now); sub.stop(now + 0.23);
+    // Heavy strikes get a second, much lower layer that outlasts the crack.
+    // Pitch alone does not make a hit feel big -- it needs energy under 60 Hz
+    // and a longer tail, so the impact lands in the chest rather than the ear.
+    if (heavy) {
+        const boom = ctx.createOscillator();
+        boom.type = 'sine';
+        boom.frequency.setValueAtTime(96, now);
+        boom.frequency.exponentialRampToValueAtTime(28, now + 0.38);
+        const bLp = ctx.createBiquadFilter();
+        bLp.type = 'lowpass'; bLp.frequency.value = 130;
+        const bg = ctx.createGain();
+        bg.gain.setValueAtTime(0.0001, now);
+        bg.gain.exponentialRampToValueAtTime(onFlesh ? 0.42 : 0.24, now + 0.014);
+        bg.gain.exponentialRampToValueAtTime(0.0001, now + 0.44);
+        boom.connect(bLp); bLp.connect(bg); bg.connect(ctx.destination);
+        boom.start(now); boom.stop(now + 0.47);
+    }
+    // Crack: a short square burst through a highpass for the slap.
+    const crack = ctx.createOscillator();
+    crack.type = 'square';
+    crack.frequency.setValueAtTime((onFlesh ? 340 : 900) * p, now);
+    crack.frequency.exponentialRampToValueAtTime((onFlesh ? 120 : 300) * p, now + 0.05);
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = (onFlesh ? 240 : 700) * p;
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.0001, now);
+    cg.gain.exponentialRampToValueAtTime(onFlesh ? 0.13 : 0.19, now + 0.005);
+    cg.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+    crack.connect(hp); hp.connect(cg); cg.connect(ctx.destination);
+    crack.start(now); crack.stop(now + 0.09);
+}
+
+function playMeleeKiai(profile) {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const p = profile.whooshPitch;
+    // A clipped vocal bark: a formant-ish trio of oscillators, gated hard.
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(0.0001, now);
+    master.gain.exponentialRampToValueAtTime(isMobileProfile ? 0.09 : 0.13, now + 0.02);
+    master.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(2200, now);
+    lp.frequency.exponentialRampToValueAtTime(700, now + 0.22);
+    lp.connect(master); master.connect(ctx.destination);
+    for (const [f, det] of [[188, 0], [372, 7], [742, -9]]) {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(f * p, now);
+        o.frequency.exponentialRampToValueAtTime(f * p * 0.72, now + 0.22);
+        o.detune.value = det;
+        const g = ctx.createGain();
+        g.gain.value = f > 500 ? 0.25 : 0.6;
+        o.connect(g); g.connect(lp);
+        o.start(now); o.stop(now + 0.26);
+    }
+}
+
+// ===========================================================================
+// === MODERN WARFARE AIRDROPS ===============================================
+// ===========================================================================
+// A dark green AC-130 makes a high pass over the active level and parachutes a
+// supply crate into open ground near the player. Walking into the crate grants
+// that weapon's ammunition. Only Modern Warfare arms this; every other mode
+// leaves airdropActive false and pays nothing for it.
+//
+// The aircraft and the crates are plain scene objects on a hand-rolled
+// descent, not physics bodies. A parachute simulated in cannon-es would be a
+// constraint rig with no gameplay payoff, and the crate has to land on a
+// predictable, reachable spot.
+
+// Shared geometry and materials, built once on the first drop.
+function ensureAirdropAssets() {
+    if (_airdropAssets) return _airdropAssets;
+    _airdropAssets = {
+        planeBody:  new THREE.MeshStandardMaterial({ color: 0x2f3a24, roughness: 0.88, metalness: 0.12 }),
+        planeDark:  new THREE.MeshStandardMaterial({ color: 0x1d2415, roughness: 0.92, metalness: 0.10 }),
+        planeGlass: new THREE.MeshStandardMaterial({ color: 0x10161c, roughness: 0.35, metalness: 0.55 }),
+        propMat:    new THREE.MeshStandardMaterial({
+            color: 0x14170f, roughness: 0.9, metalness: 0.1,
+            transparent: true, opacity: 0.42, side: THREE.DoubleSide,
+        }),
+        crateMat:   new THREE.MeshStandardMaterial({ color: 0x4a5233, roughness: 0.92, metalness: 0.05 }),
+        crateTrim:  new THREE.MeshStandardMaterial({ color: 0x2a2f1d, roughness: 0.95, metalness: 0.05 }),
+        chuteMat:   new THREE.MeshStandardMaterial({
+            color: 0xd8d2bd, roughness: 0.95, metalness: 0.0, side: THREE.DoubleSide,
+        }),
+        riggingMat: new THREE.LineBasicMaterial({ color: 0x2b2b26 }),
+        crateGeo:   new THREE.BoxGeometry(1.15, 0.95, 1.15),
+        trimGeo:    new THREE.BoxGeometry(1.20, 0.16, 1.20),
+        chuteGeo:   new THREE.SphereGeometry(2.15, 12, 6, 0, Math.PI * 2, 0, Math.PI * 0.5),
+        markerGeo:  new THREE.CylinderGeometry(0.34, 0.62, AIRDROP_MARKER_H, 8, 1, true),
+    };
+    return _airdropAssets;
+}
+
+// Low-poly AC-130. The 21 airframe pieces are merged into ONE mesh with three
+// material groups, so a pass costs 8 draw calls (3 airframe + 4 propellers +
+// 1 cargo ramp) rather than the 26 it would cost as loose meshes. Rendering is
+// this project's known bottleneck, so even a transient prop pays for its own
+// batching. If mergeGeometries refuses the input, the builder falls back to
+// loose meshes rather than failing the drop.
+function buildAc130() {
+    const A = ensureAirdropAssets();
+    const group = new THREE.Group();
+    group.rotation.order = 'YXZ';
+
+    // [geometry, x, y, z, rotX, rotY, rotZ, materialSlot]
+    // Nose points toward -Z, matching the drone and the camera convention.
+    const parts = [
+        [new THREE.CylinderGeometry(1.55, 1.55, 19, 8),  0, 0, 0,      Math.PI / 2, 0, 0, 0],   // fuselage
+        [new THREE.ConeGeometry(1.55, 3.4, 8),           0, 0, -11.2,  -Math.PI / 2, 0, 0, 0],  // nose
+        [new THREE.ConeGeometry(1.55, 6.0, 8),           0, 0.55, 12.4, Math.PI / 2, 0, 0, 0],  // upswept tail cone
+        [new THREE.BoxGeometry(4.4, 0.9, 12),            0, -1.30, 0.5, 0, 0, 0, 1],            // belly plate
+        [new THREE.BoxGeometry(30, 0.44, 3.4),           0, 1.42, -1.2, 0, 0, 0, 0],            // high wing
+        [new THREE.BoxGeometry(30, 0.30, 0.9),           0, 1.16, 0.25, 0, 0, 0, 1],            // wing underside strip
+        [new THREE.BoxGeometry(12.5, 0.34, 2.4),         0, 2.10, 13.2, 0, 0, 0, 0],            // tailplane
+        [new THREE.BoxGeometry(0.42, 5.4, 4.4),          0, 4.30, 13.6, 0, 0, 0, 0],            // fin
+        [new THREE.BoxGeometry(2.6, 1.0, 1.3),           0, 0.95, -9.6, 0, 0, 0, 2],            // cockpit glass
+        [new THREE.BoxGeometry(1.1, 0.8, 2.2),          -1.7, -0.6, -8.6, 0, 0, 0, 1],          // port sponson
+        [new THREE.BoxGeometry(1.1, 0.8, 2.2),           1.7, -0.6, -8.6, 0, 0, 0, 1],          // starboard sponson
+        // Side gun barrels: an AC-130 reads instantly from its port-side battery.
+        [new THREE.CylinderGeometry(0.16, 0.16, 2.2, 6), -1.9, -0.35, 1.2, 0, 0, Math.PI / 2, 1],
+        [new THREE.CylinderGeometry(0.22, 0.22, 2.6, 6), -1.9, -0.35, 3.4, 0, 0, Math.PI / 2, 1],
+    ];
+    // Four engine nacelles on the wing.
+    for (const nx of [-9.6, -5.3, 5.3, 9.6]) {
+        parts.push([new THREE.CylinderGeometry(0.62, 0.52, 3.6, 8), nx, 1.05, -2.6, Math.PI / 2, 0, 0, 1]);
+        parts.push([new THREE.CylinderGeometry(0.20, 0.20, 0.6, 6), nx, 1.05, -4.5, Math.PI / 2, 0, 0, 0]);
+    }
+
+    const slotMats = [A.planeBody, A.planeDark, A.planeGlass];
+    let airframe = null;
+    // Scratch geometries created during the merge attempt. The ORIGINALS in
+    // `parts` are never disposed here -- the fallback below still needs them if
+    // the merge fails, and disposing a geometry that is about to be rendered
+    // only works by accident (three silently re-uploads it).
+    const scratch = [];
+    try {
+        const geos = [[], [], []];
+        const m = new THREE.Matrix4();
+        const e = new THREE.Euler();
+        for (const [geo, px, py, pz, rx, ry, rz, slot] of parts) {
+            e.set(rx, ry, rz);
+            m.makeRotationFromEuler(e);
+            m.setPosition(px, py, pz);
+            const baked = geo.clone().applyMatrix4(m);
+            scratch.push(baked);
+            geos[slot].push(baked);
+        }
+        // mergeGeometries with useGroups expects one geometry per material, so
+        // each slot is merged on its own first and the results merged again.
+        const perSlot = geos.map(list => (list.length ? mergeGeometries(list, false) : null));
+        for (const g of perSlot) if (g) scratch.push(g);
+        // mergeGeometries returns null (it does not throw) when inputs are
+        // incompatible. If any slot that HAD parts came back null we would
+        // silently fly a plane with its belly missing, so treat that as a
+        // failure and take the loose-mesh path instead.
+        const slotFailed = perSlot.some((g, i) => geos[i].length > 0 && !g);
+        const present = [];
+        const mats = [];
+        perSlot.forEach((g, i) => { if (g) { present.push(g); mats.push(slotMats[i]); } });
+        const merged = (!slotFailed && present.length) ? mergeGeometries(present, true) : null;
+        if (merged) {
+            airframe = new THREE.Mesh(merged, mats);
+            airframe.castShadow = false;   // 60 m up; its shadow would never be read
+            group.add(airframe);
+        }
+    } catch (err) {
+        console.warn('AC-130 geometry merge failed; falling back to loose meshes.', err);
+        airframe = null;
+    }
+    if (airframe) {
+        // Merge succeeded: the merged copy owns the data, so both the scratch
+        // copies and the source geometries can go.
+        for (const g of scratch) g.dispose();
+        for (const p of parts) p[0].dispose();
+    } else {
+        for (const g of scratch) g.dispose();
+        for (const [geo, px, py, pz, rx, ry, rz, slot] of parts) {
+            const mesh = new THREE.Mesh(geo, slotMats[slot]);
+            mesh.position.set(px, py, pz);
+            mesh.rotation.set(rx, ry, rz);
+            group.add(mesh);
+        }
+    }
+
+    // Propeller discs stay separate: they spin.
+    const props = [];
+    const propGeo = new THREE.CylinderGeometry(1.95, 1.95, 0.06, 10);
+    for (const nx of [-9.6, -5.3, 5.3, 9.6]) {
+        const p = new THREE.Mesh(propGeo, A.propMat);
+        p.position.set(nx, 1.05, -4.7);
+        p.rotation.x = Math.PI / 2;
+        group.add(p);
+        props.push(p);
+    }
+    // Rear cargo ramp, hinged at the bottom of the tail; drops open to release.
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(2.9, 0.26, 4.2), A.planeDark);
+    const rampPivot = new THREE.Object3D();
+    rampPivot.position.set(0, -1.05, 9.6);
+    ramp.position.set(0, 0, 2.1);
+    rampPivot.add(ramp);
+    group.add(rampPivot);
+
+    group.userData.props = props;
+    group.userData.rampPivot = rampPivot;
+    return group;
+}
+
+function ensureAirdropHud() {
+    if (airdropHudEl) return airdropHudEl;
+    const el = document.createElement('div');
+    el.id = 'airdropHud';
+    el.style.position = 'fixed';
+    el.style.left = '50%';
+    el.style.top = '52px';                       // sits under the story HUD pill
+    el.style.transform = 'translateX(-50%)';
+    el.style.padding = '7px 16px';
+    el.style.borderRadius = '4px';
+    el.style.border = '1px solid rgba(120, 200, 120, 0.45)';
+    el.style.background = 'rgba(10, 20, 10, 0.78)';
+    el.style.color = '#cdf0b8';
+    el.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    el.style.fontSize = '13px';
+    el.style.letterSpacing = '0.10em';
+    el.style.textTransform = 'uppercase';
+    el.style.zIndex = '122';
+    el.style.pointerEvents = 'none';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    airdropHudEl = el;
+    return el;
+}
+
+function setAirdropHud(text, holdMs = 4200) {
+    const el = ensureAirdropHud();
+    if (!text) { el.style.display = 'none'; airdropHudUntil = 0; return; }
+    el.textContent = text;
+    el.style.display = 'block';
+    airdropHudUntil = performance.now() + holdMs;
+}
+
+// Full reset, including the undelivered pool: a brand new round.
+function resetAirdropSystem() {
+    clearAirdropWorldObjects();
+    airdropActive = false;
+    airdropPool = [];
+    airdropNextRunIn = 0;
+    setAirdropHud('');
+}
+
+// Destroys in-world objects but keeps the pool, so undelivered weapons follow
+// the player from the town to the bridge to the castle.
+// Each pass builds its own merged airframe geometry, so it has to be released
+// on despawn or a long round leaks one per run. Materials come from the shared
+// _airdropAssets and must be left alone.
+function disposeAc130(group) {
+    group.traverse(o => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+}
+
+function clearAirdropWorldObjects() {
+    if (airdropPlane) {
+        stopAc130Drone();
+        scene.remove(airdropPlane.group);
+        disposeAc130(airdropPlane.group);
+        airdropPlane = null;
+    }
+    // A crate the player never reached is not a lost weapon. Put its contents
+    // back at the FRONT of the pool so the next level's pass re-delivers it --
+    // otherwise advancing from the town to the bridge with two crates still on
+    // the ground would destroy those weapons for the rest of the run.
+    let returned = 0;
+    for (const c of airdropCrates) {
+        if (!c.group) continue;
+        if (!c.collected && c.item) { airdropPool.unshift(c.item); returned++; }
+        disposeAirdropCrate(c);
+    }
+    airdropCrates.length = 0;
+    if (returned > 0) airdropNextRunIn = AIRDROP_FIRST_PASS_SEC;
+}
+
+function armAirdropForDifficulty(key) {
+    resetAirdropSystem();
+    const d = DIFFICULTIES[key];
+    if (!d || !Array.isArray(d.airdropPool) || !d.airdropPool.length) return;
+    // Copy so a retry does not consume the difficulty table.
+    // `chance` (absent = always) is rolled once per round, here, rather than
+    // at drop time: the manifest has to be settled before the first pass so
+    // the stick planner knows how many crates it is placing.
+    airdropPool = d.airdropPool
+        .filter(e => e.chance == null || Math.random() < e.chance)
+        .map(e => ({ kind: e.kind, weapon: e.weapon, amount: e.amount }));
+    airdropActive = true;
+    airdropNextRunIn = AIRDROP_FIRST_PASS_SEC;
+    setAirdropHud('No firearms issued. Air resupply inbound.', 9000);
+}
+
+// Solid ground height for a crate at (x, z). npcGroundY covers the drawbridge,
+// the trench, the moat and rubble; the bridge deck has its own analytic
+// surface, which npcGroundY deliberately does not include.
+function airdropGroundY(x, z) {
+    let y = npcGroundY(x, z);
+    if (storyModeEnabled && storyStage === 1 && Math.abs(z) < STORY_BRIDGE_ROAD_HALF_Z + 1.2) {
+        y = Math.max(y, bridgeWalkerSurfaceY(x));
+    }
+    return y;
+}
+
+// Is (x, z) somewhere a crate can land and be walked to?
+function airdropLandingOk(x, z) {
+    // Never over water: a crate bobbing in the moat is unreachable.
+    if (getWaterSurfaceYAtXZ(x, z) != null) return false;
+    // The moat ring test is pure geometry, so it has to be gated on the castle
+    // actually owning the frame -- otherwise it would veto perfectly good spots
+    // on the bridge level, whose ground patch fills that same footprint. This
+    // is the same stage condition npcGroundY uses.
+    const castleStageActive = !storyModeEnabled || storyStage === 2 || storyStage === 3;
+    if (castleStageActive && isInCastleMoatRingXZ(x, z, 1.5)) return false;
+    // isInStoryBridgeTrenchXZ already self-gates on the trench being active.
+    if (isInStoryBridgeTrenchXZ(x, z, 1.5)) return false;
+    // Inside a town house, not on the street outside it.
+    if (townStageActive) {
+        for (const [cx, cz, w, d] of TOWN_HOUSES) {
+            const r = Math.hypot(w, d) * 0.5 + 1.2;
+            const dx = x - cx, dz = z - cz;
+            if (dx * dx + dz * dz < r * r) return false;
+        }
+        const tz = z - 24;                                  // the tavern
+        if (x * x + tz * tz < 10.5 * 10.5) return false;
+    }
+    // On top of a standing wall rather than on the ground beside it.
+    if (rubbleHeightAt(x, z) > 3.0) return false;
+    return true;
+}
+
+// Playable bounds of whichever level owns the frame, so a drop lands in the
+// arena rather than on empty grass a hundred metres past the last house.
+// Returns [minX, maxX, minZ, maxZ].
+function airdropArenaBounds() {
+    if (townStageActive) return [-28, 28, -62, 34];            // road strip plus both verges
+    if (storyModeEnabled && storyStage === 1) {
+        // Bridge: the deck plus a good stretch of approach road at each end.
+        const outer = STORY_BRIDGE_RAMP_OUTER_X + 46;
+        return [-outer, outer, -26, 26];
+    }
+    // Castle: the approach field in front of the moat plus the island itself.
+    return [-52, 52, -18, 104];
+}
+
+// Somewhere open, 42-88 m from the player and inside the arena. Returns null if
+// nothing valid turned up, in which case the run is deferred rather than
+// dropping a crate into the moat or off the edge of the level. This is only
+// the AIM POINT for the pass; the wind then throws each canopy away from it.
+function pickAirdropTarget() {
+    const px = camera.position.x, pz = camera.position.z;
+    const [minX, maxX, minZ, maxZ] = airdropArenaBounds();
+    for (let i = 0; i < 40; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const rad = 42 + Math.random() * 46;
+        const x = px + Math.cos(ang) * rad;
+        const z = pz + Math.sin(ang) * rad;
+        if (x < minX || x > maxX || z < minZ || z > maxZ) continue;
+        if (!airdropLandingOk(x, z)) continue;
+        return { x, z };
+    }
+    // Nothing in the annulus worked -- the player may be backed into a corner of
+    // the arena. Fall back to a wider sweep before giving up on this run.
+    for (let i = 0; i < 40; i++) {
+        const x = minX + Math.random() * (maxX - minX);
+        const z = minZ + Math.random() * (maxZ - minZ);
+        const d2 = (x - px) * (x - px) + (z - pz) * (z - pz);
+        if (d2 < 34 * 34 || d2 > 110 * 110) continue;  // not on top of them, not unreachable
+        if (!airdropLandingOk(x, z)) continue;
+        return { x, z };
+    }
+    return null;
+}
+
+// Advances one crate's descent by dt. The SAME function drives the live crates
+// and the pre-flight landing prediction below, so the plan and the thing that
+// actually happens cannot drift apart. `s` needs x/y/z, vx/vy/vz, windX/windZ
+// and age.
+function stepCrateDescent(s, dt) {
+    s.age += dt;
+    if (s.age >= AIRDROP_CHUTE_DELAY) {
+        // Under canopy: vertical speed settles to terminal, the release
+        // momentum bleeds off, and the wind takes over.
+        s.vy += (-AIRDROP_FALL_SPEED - s.vy) * Math.min(1, dt * 3.4);
+        s.vx *= (1 - Math.min(1, dt * AIRDROP_DRIFT_DECAY));
+        s.vz *= (1 - Math.min(1, dt * AIRDROP_DRIFT_DECAY));
+        s.x += s.windX * dt;
+        s.z += s.windZ * dt;
+    } else {
+        // Chute still packed: a bare crate, essentially unaffected by wind.
+        s.vy -= 13.0 * dt;
+    }
+    s.x += s.vx * dt;
+    s.z += s.vz * dt;
+    s.y += s.vy * dt;
+}
+
+// Flies the descent model forward and reports where the crate touches down.
+// Coarser than the live step (20 Hz vs frame rate) because it runs up to a few
+// hundred times while planning a pass; the sim showed the landing point moves
+// by under 0.5 m between 20 fps and 144 fps, which is far inside the tolerance
+// that matters here.
+function predictCrateLanding(sx, sy, sz, vx, vz, windX, windZ) {
+    const s = _cratePredict;
+    s.x = sx; s.y = sy; s.z = sz;
+    s.vx = vx; s.vz = vz; s.vy = -2.0;
+    s.windX = windX; s.windZ = windZ;
+    s.age = 0;
+    const dt = 1 / 20;
+    for (let i = 0; i < 400; i++) {          // 20 s of flight is a hard ceiling
+        stepCrateDescent(s, dt);
+        if (s.y <= airdropGroundY(s.x, s.z) + 0.48) break;
+    }
+    return { x: s.x, z: s.z, t: s.age };
+}
+
+// Run heading. Deliberately NOT uniformly random: fly along the arena's long
+// axis. Crossing the short axis of a narrow arena (the town is a 56 m wide
+// street) puts the back of the stick outside the map before the wind gets a
+// say, and no amount of resampling recovers it.
+function pickAirdropRunHeading(minX, maxX, minZ, maxZ) {
+    // heading 0 travels along +Z, PI/2 along +X (dir = [sin h, cos h]).
+    const base = (maxZ - minZ) >= (maxX - minX) ? 0 : Math.PI / 2;
+    const reversed = Math.random() < 0.5 ? Math.PI : 0;
+    return base + reversed + (Math.random() - 0.5) * 0.7;
+}
+
+// Plans one whole stick: for each crate, samples winds until the descent model
+// says it lands somewhere legal, in bounds, and clear of its siblings.
+//
+// The wind is chosen by rejection sampling rather than by solving backwards
+// from a chosen landing spot, so it stays a real physical input, and every
+// candidate is validated by flying the ACTUAL descent model -- a crate can
+// never be planned into the moat or onto the top of a wall.
+function planAirdropStick(target, heading, dropCount, releaseAt, minX, maxX, minZ, maxZ) {
+    const dirX = Math.sin(heading), dirZ = Math.cos(heading);
+    // One prevailing wind for the pass, with each canopy catching it very
+    // differently. That reads as weather rather than as N unrelated vectors,
+    // while still throwing the crates to genuinely separate places.
+    const windAng = Math.random() * Math.PI * 2;
+    // The floor matters as much as the ceiling: the old 2.0 m/s base paired
+    // with a 0.30 multiplier meant the weakest draw carried a canopy barely
+    // 4 m off the aim point, which is how crates ended up in a heap.
+    const windBase = 2.6 + Math.random() * 3.0;    // m/s
+    const sy = AIRDROP_PLANE_ALT - 1.6;
+    const vx = dirX * AIRDROP_PLANE_SPEED * AIRDROP_DRIFT_FRAC;
+    const vz = dirZ * AIRDROP_PLANE_SPEED * AIRDROP_DRIFT_FRAC;
+    const plan = [];
+
+    for (let k = 0; k < dropCount; k++) {
+        // Where this crate leaves the ramp, in world space. The releases are
+        // close together on purpose: the SPACING is not what scatters them, the
+        // wind is. A long stick just walks the back half out of the arena.
+        const trackAt = releaseAt + k * AIRDROP_DROP_SPACING - AIRDROP_RUN_HALF_LEN - AIRDROP_RAMP_OFFSET;
+        const sx = target.x + dirX * trackAt;
+        const sz = target.z + dirZ * trackAt;
+        // Which way the middle of the arena lies. Later attempts aim the wind
+        // that way, which is what rescues drops planned near a boundary.
+        const toCentreAng = Math.atan2((minX + maxX) * 0.5 - sx, (minZ + maxZ) * 0.5 - sz);
+
+        let best = null;
+        for (let attempt = 0; attempt < AIRDROP_WIND_ATTEMPTS; attempt++) {
+            const spread = AIRDROP_WIND_SPREAD * (1 + attempt * 0.06);
+            const base = attempt < AIRDROP_WIND_ATTEMPTS / 2 ? windAng : toCentreAng;
+            const ang = base + (Math.random() - 0.5) * spread * 2;
+            const spd = windBase * (0.62 + Math.random() * 1.25);
+            const wx = Math.sin(ang) * spd;
+            const wz = Math.cos(ang) * spd;
+            const land = predictCrateLanding(sx, sy, sz, vx, vz, wx, wz);
+            if (land.x < minX || land.x > maxX || land.z < minZ || land.z > maxZ) continue;
+            if (!airdropLandingOk(land.x, land.z)) continue;
+            // Make them go and look for it. Without this the wind is free to
+            // put a crate wherever the player happens to be standing, which is
+            // the single thing that makes a drop feel handed over rather than
+            // found. Relaxes with attempts like the separation below, so a
+            // cornered player still gets their resupply.
+            const near = AIRDROP_MIN_PLAYER_DIST * Math.max(0.45, 1 - attempt * 0.035);
+            const pdx = land.x - camera.position.x, pdz = land.z - camera.position.z;
+            if (pdx * pdx + pdz * pdz < near * near) continue;
+            // Keep them apart -- "different areas", not five crates in a heap.
+            // The requirement relaxes as attempts fail so a tight arena still
+            // places everything rather than deferring half the arsenal.
+            const sep = AIRDROP_MIN_SEPARATION * Math.max(0.62, 1 - attempt * 0.03);
+            let tooClose = false;
+            for (const p of plan) {
+                if (p.skip) continue;
+                const ddx = land.x - p.landX, ddz = land.z - p.landZ;
+                if (ddx * ddx + ddz * ddz < sep * sep) { tooClose = true; break; }
+            }
+            if (tooClose) continue;
+            best = { windX: wx, windZ: wz, landX: land.x, landZ: land.z, skip: false };
+            break;
+        }
+        // No wind worked for this slot. Try straight down the track; if even
+        // that is illegal, mark the slot skipped and leave the weapon in the
+        // pool for a catch-up pass rather than dropping it out of reach.
+        if (!best) {
+            const land = predictCrateLanding(sx, sy, sz, vx, vz, 0, 0);
+            const inBounds = land.x >= minX && land.x <= maxX && land.z >= minZ && land.z <= maxZ;
+            if (inBounds && airdropLandingOk(land.x, land.z)) {
+                best = { windX: 0, windZ: 0, landX: land.x, landZ: land.z, skip: false };
+            }
+        }
+        plan.push(best || { windX: 0, windZ: 0, landX: 0, landZ: 0, skip: true });
+    }
+    return plan;
+}
+
+// Sends the aircraft in on a straight track and puts the WHOLE remaining
+// arsenal out of the back of it in one stick, each crate on its own wind so
+// they scatter to separate parts of the map.
+function launchAirdropRun() {
+    if (airdropPlane || !airdropPool.length) return false;
+    const target = pickAirdropTarget();
+    if (!target) return false;
+
+    const dropCount = airdropPool.length;          // the lot, in one pass
+    const [minX, maxX, minZ, maxZ] = airdropArenaBounds();
+    const releaseAt = AIRDROP_RUN_HALF_LEN - AIRDROP_RELEASE_LEAD;
+
+    // Try a few complete passes and keep the best. A single heading can be
+    // unlucky -- fly across the short axis of a narrow arena and the back half
+    // of the stick has nowhere legal to go. Retrying the whole plan takes the
+    // town from 75% to 96% of passes placing all five crates.
+    let plan = null, heading = 0, planSkipped = Infinity;
+    for (let pass = 0; pass < AIRDROP_PLAN_PASSES; pass++) {
+        const h = pickAirdropRunHeading(minX, maxX, minZ, maxZ);
+        const p = planAirdropStick(target, h, dropCount, releaseAt, minX, maxX, minZ, maxZ);
+        const skipped = p.filter(e => e.skip).length;
+        if (skipped < planSkipped) { plan = p; heading = h; planSkipped = skipped; }
+        if (skipped === 0) break;
+    }
+    if (!plan || plan.every(p => p.skip)) return false;   // nowhere to put anything; retry later
+
+    const dirX = Math.sin(heading), dirZ = Math.cos(heading);
+    const group = buildAc130();
+    // The model's nose points along local -Z. Rotating by Y maps (0,0,-1) to
+    // (-sin y, 0, -cos y), so y = heading + PI gives (sin h, cos h) = (dirX, dirZ).
+    group.rotation.y = heading + Math.PI;
+    group.position.set(
+        target.x - dirX * AIRDROP_RUN_HALF_LEN,
+        AIRDROP_PLANE_ALT,
+        target.z - dirZ * AIRDROP_RUN_HALF_LEN
+    );
+    scene.add(group);
+
+    airdropPlane = {
+        group,
+        dirX, dirZ,
+        target,
+        travelled: 0,
+        // Release early: the crate keeps part of the aircraft's momentum, so
+        // the release point leads the target by AIRDROP_RELEASE_LEAD metres.
+        releaseAt,
+        plan,
+        dropIndex: 0,
+        dropsLeft: dropCount,
+        dropSpacing: AIRDROP_DROP_SPACING,
+        nextDropAt: releaseAt,
+        totalLen: AIRDROP_RUN_HALF_LEN * 2,
+        rampT: 0,
+    };
+    startAc130Drone();
+    const planned = plan.filter(p => !p.skip).length;
+    setAirdropHud(`▲ AC-130 inbound — ${planned} crate${planned === 1 ? '' : 's'} on the wind`, 6000);
+    return true;
+}
+
+function spawnAirdropCrate(x, y, z, vx, vz, windX, windZ, item) {
+    const A = ensureAirdropAssets();
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(A.crateGeo, A.crateMat);
+    body.castShadow = true;
+    group.add(body);
+    // Band in the drop's signal colour: the crate tells you what is in it.
+    const tintHex = airdropItemTint(item);
+    const tint = new THREE.MeshStandardMaterial({
+        color: tintHex, roughness: 0.7, metalness: 0.15,
+        emissive: tintHex, emissiveIntensity: 0.30,
+    });
+    const band = new THREE.Mesh(A.trimGeo, tint);
+    group.add(band);
+
+    // Canopy, packed until the chute deploys.
+    const chute = new THREE.Mesh(A.chuteGeo, A.chuteMat);
+    chute.position.y = 2.6;
+    chute.scale.setScalar(0.05);
+    group.add(chute);
+    // Rigging: four lines from the canopy rim to the crate corners.
+    const pts = [];
+    for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+        pts.push(Math.cos(a) * 2.05, 2.6, Math.sin(a) * 2.05);
+        pts.push(Math.cos(a) * 0.55, 0.48, Math.sin(a) * 0.55);
+    }
+    const rigGeo = new THREE.BufferGeometry();
+    rigGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const rigging = new THREE.LineSegments(rigGeo, A.riggingMat);
+    rigging.visible = false;
+    group.add(rigging);
+
+    group.position.set(x, y, z);
+    scene.add(group);
+
+    airdropCrates.push({
+        group, chute, rigging, band, tint, rigGeo,
+        item,
+        landed: false,
+        collected: false,
+        chutePopped: false,
+        age: 0,
+        vy: -2.0,                       // released with a slight downward push
+        vx, vz,
+        // Constant per-crate wind, applied only once the canopy is out. Chosen
+        // during run planning so this crate's touchdown is known to be legal.
+        windX, windZ,
+        // Live x/y/z mirrors used by the shared descent model; copied back onto
+        // the group after each step.
+        x, y, z,
+        swayPhase: Math.random() * Math.PI * 2,
+        marker: null,
+        label: null,
+        collapse: 0,
+    });
+}
+
+// Builds the ground marker: a coloured smoke column plus a floating label, so
+// a crate that lands behind a wall can still be found.
+function attachAirdropMarker(crate) {
+    const A = ensureAirdropAssets();
+    const colour = airdropItemTint(crate.item);
+    const mat = new THREE.MeshBasicMaterial({
+        color: colour, transparent: true, opacity: 0.30,
+        side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    const col = new THREE.Mesh(A.markerGeo, mat);
+    col.position.y = AIRDROP_MARKER_H * 0.5 + 0.4;
+    crate.group.add(col);
+    crate.marker = col;
+
+    // Label sprite: weapon icon and count, drawn once into a canvas.
+    const cv = document.createElement('canvas');
+    cv.width = 256; cv.height = 64;
+    const g2 = cv.getContext('2d');
+    g2.fillStyle = 'rgba(8, 16, 8, 0.80)';
+    g2.fillRect(0, 0, 256, 64);
+    g2.strokeStyle = '#' + colour.toString(16).padStart(6, '0');
+    g2.lineWidth = 4;
+    g2.strokeRect(2, 2, 252, 60);
+    g2.fillStyle = '#eaf7e0';
+    g2.font = 'bold 30px ui-monospace, Consolas, monospace';
+    g2.textAlign = 'center';
+    g2.textBaseline = 'middle';
+    g2.fillText(airdropItemLabel(crate.item), 128, 34);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+    sprite.scale.set(4.2, 1.05, 1);
+    sprite.position.y = 2.3;
+    crate.group.add(sprite);
+    crate.label = sprite;
+}
+
+function collectAirdropCrate(crate) {
+    crate.collected = true;
+    if (crate.item.kind === 'heart') { collectHeartCrate(crate); return; }
+    const idx = crate.item.weapon;
+    const prev = p1Ammo[idx] || 0;
+    p1Ammo[idx] = prev + crate.item.amount;
+    // A rifle recovered with nothing chambered comes with a magazine in it.
+    if (idx === WEAPON_IDX_RIFLE && rifleMag <= 0) {
+        rifleMag = Math.min(RIFLE_MAG_SIZE, p1Ammo[idx]);
+    }
+    // Pick it up automatically when the player is still empty-handed, so the
+    // first drop is felt immediately rather than needing a weapon switch.
+    if (currentWeapon === WEAPON_IDX_KARATE) setWeapon(idx);
+    else updateUI();
+    const p = crate.group.position;
+    spawnScorePopup(p.x, p.y + 1.4, p.z, `${WEAPONS[idx].name} ×${crate.item.amount}`, 'kill big');
+    setAirdropHud(`Recovered: ${WEAPONS[idx].name} ×${crate.item.amount}`, 3600);
+    playCrateCollect();
+    disposeAirdropCrate(crate);
+}
+
+// Medical resupply. Restores a heart that has been knocked off, or -- if the
+// player is untouched -- fits an EXTRA one above the usual three, up to the
+// cap. Either way one crate is worth exactly one heart.
+function collectHeartCrate(crate) {
+    const p = crate.group.position;
+    let line;
+    if (playerHits > 0) {
+        playerHits--;
+        line = 'Patched up \u2014 heart restored';
+    } else if (playerMaxHearts < PLAYER_HEART_CAP) {
+        playerMaxHearts++;
+        line = `Extra heart \u2014 ${playerMaxHearts} hearts`;
+    } else {
+        // Nothing to give. Leave the crate on the ground so it can be come back
+        // to after taking a hit, rather than burning it for nothing. The pickup
+        // test runs every frame while the player stands on it, so the nudge is
+        // rate-limited instead of being re-set sixty times a second.
+        crate.collected = false;
+        const nowMs = performance.now();
+        if (nowMs - (crate._fullHealthNagAt || 0) > 4000) {
+            crate._fullHealthNagAt = nowMs;
+            setAirdropHud('Already at full health \u2014 leave it for later', 2600);
+        }
+        return;
+    }
+    updateHearts();
+    spawnScorePopup(p.x, p.y + 1.4, p.z, '\u2764 +1 HEART', 'kill big');
+    setAirdropHud(line, 3600);
+    playHeartPickup();
+    disposeAirdropCrate(crate);
+}
+
+// A warm rising two-note chime, so the medical crate does not sound like the
+// ammunition ones.
+function playHeartPickup() {
+    if (!soundEnabled) return;
+    let ctx;
+    try { ctx = getAudio(); } catch (e) { return; }
+    const now = ctx.currentTime;
+    for (const [f, delay, gain] of [[523.25, 0, 0.26], [783.99, 0.10, 0.30], [1046.5, 0.20, 0.22]]) {
+        const o = ctx.createOscillator();
+        o.type = 'sine';
+        o.frequency.value = f;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, now + delay);
+        g.gain.exponentialRampToValueAtTime(gain, now + delay + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.34);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(now + delay); o.stop(now + delay + 0.38);
+    }
+}
+
+// Frees the per-crate resources. The crate geometry, canopy and rigging
+// material are shared out of _airdropAssets and must NOT be disposed; the tint
+// band, smoke column material and label texture are made per crate and would
+// otherwise accumulate one set per drop for the whole session.
+function disposeAirdropCrate(crate) {
+    scene.remove(crate.group);
+    if (crate.tint) crate.tint.dispose();
+    if (crate.marker && crate.marker.material) crate.marker.material.dispose();
+    if (crate.label && crate.label.material) {
+        if (crate.label.material.map) crate.label.material.map.dispose();
+        crate.label.material.dispose();
+    }
+    if (crate.rigGeo) crate.rigGeo.dispose();
+}
+
+function updateAirdropSystem(dt) {
+    if (airdropHudUntil && performance.now() > airdropHudUntil) setAirdropHud('');
+    if (!airdropActive) return;
+
+    // --- scheduling ---------------------------------------------------------
+    if (!gameOver && !airdropPlane && airdropPool.length) {
+        airdropNextRunIn -= dt;
+        if (airdropNextRunIn <= 0) {
+            // A failed target pick (player standing in the middle of the moat,
+            // say) retries shortly rather than burning the slot.
+            airdropNextRunIn = launchAirdropRun() ? AIRDROP_GAP_SEC : 4;
+        }
+    }
+
+    // --- the aircraft -------------------------------------------------------
+    if (airdropPlane) {
+        const pl = airdropPlane;
+        const step = AIRDROP_PLANE_SPEED * dt;
+        pl.travelled += step;
+        pl.group.position.x += pl.dirX * step;
+        pl.group.position.z += pl.dirZ * step;
+        // Slight bank and bob so it does not read as a sliding cardboard cutout.
+        pl.group.rotation.z = Math.sin(pl.travelled * 0.012) * 0.05;
+        pl.group.position.y = AIRDROP_PLANE_ALT + Math.sin(pl.travelled * 0.008) * 1.2;
+        for (const p of pl.group.userData.props) p.rotation.y += dt * 44;
+
+        // Ramp opens shortly before the release point and closes after the last crate.
+        const rampOpen = pl.dropsLeft > 0 && pl.travelled > pl.releaseAt - 60;
+        pl.rampT = THREE.MathUtils.clamp(pl.rampT + (rampOpen ? dt * 1.1 : -dt * 0.8), 0, 1);
+        pl.group.userData.rampPivot.rotation.x = pl.rampT * 0.95;
+
+        if (pl.dropsLeft > 0 && pl.travelled >= pl.nextDropAt) {
+            pl.dropsLeft--;
+            pl.nextDropAt += pl.dropSpacing;
+            const slot = pl.plan[pl.dropIndex++] || { windX: 0, windZ: 0, skip: true };
+            // A skipped slot means no legal landing spot was found for it while
+            // planning. Leave that weapon in the pool for a later pass rather
+            // than dropping it somewhere it cannot be recovered from.
+            const item = slot.skip ? null : airdropPool.shift();
+            if (item) {
+                const gp = pl.group.position;
+                spawnAirdropCrate(
+                    gp.x - pl.dirX * AIRDROP_RAMP_OFFSET,   // leaves from the rear ramp
+                    gp.y - 1.6,
+                    gp.z - pl.dirZ * AIRDROP_RAMP_OFFSET,
+                    pl.dirX * AIRDROP_PLANE_SPEED * AIRDROP_DRIFT_FRAC,
+                    pl.dirZ * AIRDROP_PLANE_SPEED * AIRDROP_DRIFT_FRAC,
+                    slot.windX, slot.windZ,
+                    item
+                );
+            }
+            if (pl.dropIndex >= pl.plan.length) {
+                pl.dropsLeft = 0;
+                const away = pl.plan.filter(p => !p.skip).length;
+                setAirdropHud(
+                    airdropPool.length
+                        ? `${away} crates on the wind — ${airdropPool.length} still aboard`
+                        : `Whole arsenal away — ${away} crates scattered downwind`,
+                    6500
+                );
+            }
+        }
+
+        updateAc130Drone(pl.group.position);
+
+        if (pl.travelled >= pl.totalLen) {
+            stopAc130Drone();
+            scene.remove(pl.group);
+            disposeAc130(pl.group);
+            airdropPlane = null;
+        }
+    }
+
+    // --- crates -------------------------------------------------------------
+    for (let i = airdropCrates.length - 1; i >= 0; i--) {
+        const c = airdropCrates[i];
+        if (c.collected) { airdropCrates.splice(i, 1); continue; }
+        const gp = c.group.position;
+
+        if (!c.landed) {
+            // Position is advanced by the shared descent model, the same code
+            // the run planner flew to choose this crate's wind. Only the
+            // presentation (canopy inflation, sway, tumble) is done here.
+            const wasPacked = c.age < AIRDROP_CHUTE_DELAY;
+            stepCrateDescent(c, dt);
+            gp.set(c.x, c.y, c.z);
+            if (c.age >= AIRDROP_CHUTE_DELAY) {
+                // Canopy inflates over a quarter second, then holds.
+                const t = Math.min(1, (c.age - AIRDROP_CHUTE_DELAY) / 0.28);
+                c.chute.scale.setScalar(0.05 + 0.95 * (1 - Math.pow(1 - t, 3)));
+                c.rigging.visible = true;
+                if (!c.chutePopped) { c.chutePopped = true; playChuteDeploy(); }
+                c.swayPhase += dt * 1.6;
+                c.group.rotation.z = Math.sin(c.swayPhase) * 0.16;
+                c.group.rotation.x = Math.cos(c.swayPhase * 0.83) * 0.13;
+            } else if (wasPacked) {
+                c.group.rotation.x += dt * 2.2;         // bare crate tumbling
+            }
+
+            const groundY = airdropGroundY(gp.x, gp.z) + 0.48;
+            if (gp.y <= groundY) {
+                gp.y = groundY;
+                c.y = groundY;                  // keep the model mirror in step
+                c.landed = true;
+                c.group.rotation.set(0, Math.random() * Math.PI * 2, 0);
+                c.collapse = 1;
+                c.rigging.visible = false;
+                attachAirdropMarker(c);
+                spawnExplosion(new THREE.Vector3(gp.x, gp.y - 0.3, gp.z));   // dust puff
+                playCrateThud();
+                addShake(Math.max(0, 0.12 * (1 - camera.position.distanceTo(gp) / 45)));
+                // A full stick lands about half a second apart, so naming each
+                // one just makes the HUD flicker. Only announce the last.
+                const stillFalling = airdropCrates.some(o => o !== c && !o.landed && !o.collected);
+                if (!stillFalling) {
+                    setAirdropHud(`Drop landed: ${airdropItemLabel(c.item)}`, 4200);
+                }
+            }
+        } else {
+            // Canopy collapses over the crate and fades out.
+            if (c.collapse > 0) {
+                c.collapse = Math.max(0, c.collapse - dt * 0.9);
+                const s = 0.35 + 0.65 * c.collapse;
+                c.chute.scale.set(s * 1.15, s * 0.32, s * 1.15);
+                c.chute.position.y = 0.55 + 1.9 * c.collapse;
+                if (c.collapse === 0) c.chute.visible = false;
+            }
+            const distToPlayer = camera.position.distanceTo(gp);
+            if (c.marker) {
+                // Slow drift on the smoke column plus a gentle pulse.
+                c.marker.rotation.y += dt * 0.35;
+                c.marker.material.opacity = 0.22 + 0.10 * Math.sin(c.age * 2.1);
+            }
+            // The label is unreadable past ~45 m, and with the whole arsenal on
+            // the ground at once there can be five of them. Hide the sprite at
+            // range and let the smoke column do the work -- rendering is this
+            // project's bottleneck, so five spare draw calls are worth having.
+            if (c.label) c.label.visible = distToPlayer < 45;
+            // Re-settle. This is a destruction game: a crate that landed on a
+            // rubble pile is left hanging in mid-air the moment the player blows
+            // that pile apart. Re-check the surface a few times a second and let
+            // the crate drop to whatever is under it now.
+            if ((_frameCount & 7) === 0 || c.settling) {
+                const restY = airdropGroundY(gp.x, gp.z) + 0.48;
+                c.settling = gp.y > restY + 0.20;
+                if (c.settling) gp.y = Math.max(restY, gp.y - 9 * dt);
+            }
+            // Pickup: horizontal proximity, with a generous vertical tolerance
+            // so standing on rubble next to the crate still counts.
+            const dx = camera.position.x - gp.x;
+            const dz = camera.position.z - gp.z;
+            const dy = camera.position.y - gp.y;
+            if (dx * dx + dz * dz < AIRDROP_PICKUP_R * AIRDROP_PICKUP_R && Math.abs(dy) < 4.5) {
+                collectAirdropCrate(c);
+                // A medical crate declines to be collected at full health: it
+                // clears its own `collected` flag and stays on the ground.
+                if (c.collected) airdropCrates.splice(i, 1);
+            }
+        }
+    }
+}
+
+// --- airdrop audio ----------------------------------------------------------
+// Four turboprops: three detuned sawtooths under a lowpass, with a slow
+// amplitude beat for the prop sync. Distance drives the gain, so the pass
+// swells overhead and fades out. One persistent voice (_ac130Audio, declared
+// with the rest of the state), started and stopped with the aircraft.
+function startAc130Drone() {
+    if (!soundEnabled || _ac130Audio) return;
+    try {
+        const ctx = getAudio(), now = ctx.currentTime;
+        const master = ctx.createGain();
+        master.gain.setValueAtTime(0.0001, now);
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 260;
+        lp.Q.value = 0.6;
+        lp.connect(master);
+        master.connect(ctx.destination);
+        const oscs = [];
+        for (const [f, det] of [[47, 0], [71, -11], [94, 14]]) {
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.value = f;
+            o.detune.value = det;
+            const g = ctx.createGain();
+            g.gain.value = f < 60 ? 0.9 : 0.45;
+            o.connect(g); g.connect(lp);
+            o.start(now);
+            oscs.push(o);
+        }
+        // Prop beat: a slow tremolo on the master gain.
+        const lfo = ctx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.value = 5.6;
+        const lfoGain = ctx.createGain();
+        lfoGain.gain.value = 0.28;
+        lfo.connect(lfoGain);
+        lfoGain.connect(master.gain);
+        lfo.start(now);
+        _ac130Audio = { ctx, master, oscs, lfo, base: 0 };
+    } catch (err) {
+        console.warn('AC-130 drone audio failed to start.', err);
+        _ac130Audio = null;
+    }
+}
+
+function updateAc130Drone(planePos) {
+    if (!_ac130Audio) return;
+    const d = camera.position.distanceTo(planePos);
+    // Audible from a long way off, loudest directly overhead.
+    const target = (isMobileProfile ? 0.16 : 0.24) / (1 + d / 85);
+    _ac130Audio.base = target;
+    try {
+        _ac130Audio.master.gain.setTargetAtTime(target, _ac130Audio.ctx.currentTime, 0.25);
+    } catch (_) { /* context may be suspended */ }
+}
+
+function stopAc130Drone() {
+    if (!_ac130Audio) return;
+    const a = _ac130Audio;
+    _ac130Audio = null;
+    try {
+        const now = a.ctx.currentTime;
+        a.master.gain.cancelScheduledValues(now);
+        a.master.gain.setValueAtTime(Math.max(0.0001, a.base), now);
+        a.master.gain.exponentialRampToValueAtTime(0.0001, now + 0.8);
+        for (const o of a.oscs) o.stop(now + 0.9);
+        a.lfo.stop(now + 0.9);
+    } catch (_) { /* already torn down */ }
+}
+
+// Called from setPaused so a paused game is not left droning.
+function setAc130DroneMuted(muted) {
+    if (!_ac130Audio) return;
+    try {
+        _ac130Audio.master.gain.setTargetAtTime(
+            muted ? 0.0001 : Math.max(0.0001, _ac130Audio.base),
+            _ac130Audio.ctx.currentTime, 0.08
+        );
+    } catch (_) { /* no-op */ }
+}
+
+function playChuteDeploy() {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    // A canvas crack: broadband noise-ish burst from a fast saw sweep.
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(1400, now);
+    o.frequency.exponentialRampToValueAtTime(180, now + 0.28);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.7;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.14, now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
+    o.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    o.start(now); o.stop(now + 0.36);
+}
+
+function playCrateThud() {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(120, now);
+    o.frequency.exponentialRampToValueAtTime(38, now + 0.22);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.26, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.30);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(now); o.stop(now + 0.33);
+}
+
+function playCrateCollect() {
+    if (!soundEnabled) return;
+    const ctx = getAudio(), now = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.setValueAtTime(isMobileProfile ? 0.10 : 0.15, now);
+    master.connect(ctx.destination);
+    const note = (freq, t0, dur) => {
+        const o = ctx.createOscillator();
+        o.type = 'triangle';
+        o.frequency.setValueAtTime(freq, t0);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(1, t0 + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+        o.connect(g); g.connect(master);
+        o.start(t0); o.stop(t0 + dur + 0.02);
+    };
+    note(523, now, 0.10);            // C5
+    note(784, now + 0.07, 0.12);     // G5
+    note(1047, now + 0.15, 0.34);    // C6
+}
+
 function animate() {
     requestAnimationFrame(animate);
     const frameStartAt = _perfDebugEnabled ? performance.now() : 0;
     const rawDt = clock.getDelta();
-    const dt = Math.min(rawDt, 0.05);
+    let dt = Math.min(rawDt, 0.05);
+    // Melee hit-stop. A connecting strike freezes the world for a few frames,
+    // which is the single thing that makes a fighting-game impact read as
+    // weight rather than as a shove -- the eye needs a beat to register the
+    // contact before anything moves. Everything downstream of `dt` slows
+    // together (physics, ragdolls, the swing itself), so the freeze is on the
+    // whole scene, exactly as it is in Virtua Fighter. rawDt is untouched, so
+    // the perf overlay and the frame governors still see real time.
+    if (meleeHitStop > 0) {
+        meleeHitStop = Math.max(0, meleeHitStop - rawDt);
+        dt *= MELEE_HITSTOP_SCALE;
+    }
     const rawFps = rawDt > 0 ? (1 / rawDt) : 60;
     updateFpsBadge(rawDt);
     updateCursorInspector();
@@ -19714,6 +24036,22 @@ function animate() {
 
     const frameActiveBricks = getFrameActiveBricks();
     const castleScanBricks = getStoryRoleBricks('castle');
+    // PERF: the support + cluster passes below only ever read the CASTLE list.
+    // While another level owns the frame (town) those bricks are suppressed and
+    // asleep, so walking them every scan tick is pure overhead that can never
+    // find work. Skip the passes outright instead.
+    const _activeScanRole = getActiveStoryRole();
+    const castleScanIsActive = !_activeScanRole || _activeScanRole === 'castle';
+    // Overlay label: shows which list the structural scans actually walk, and
+    // flags the roles whose masonry gets no support scan at all.
+    if (_perfDebugEnabled) {
+        _perfDbgScanRole = castleScanIsActive ? 'castle' : ((_activeScanRole || 'castle') + ':SKIPPED');
+    }
+
+    // Rubble height field for NPC climbing. A fill plus one footprint stamp per
+    // settled brick, so a short throttle keeps walkers responsive to collapses
+    // (~130 ms worst-case staleness) without paying for it every frame.
+    if ((_frameCount % 8) === 0) rebuildRubbleField();
 
     // Unsupported-brick check.
     // KEY FIX: only sleeping bricks count as valid support. An awake (falling)
@@ -19748,12 +24086,22 @@ function animate() {
         && (_frameCount % supportScanInterval === 0)
         && (_frameCount - _lastDisturbFrame < supportScanActiveWindow)
         && !bridgeStageActive
+        && castleScanIsActive
         && !_mobilePerfEmergency;
     if (shouldRunSupportScan) {
+        const _scanT0 = _perfDebugEnabled ? performance.now() : 0;
         const GROUND_Y    = BS.h * 0.55;
         const CHECK_XZ    = BS.w * 0.85;
         const CHECK_DY_LO = 0.05;
         const CHECK_DY_HI = BS.h * 1.4;
+        // How far a brick may drift from its build slot and still count as a
+        // supporter (matches the lintel end-support tolerance below).
+        const SUPPORT_SLOT_TOL2 = 0.35 * 0.35;
+        // PERF: bound how many bricks one scan tick may wake. Unbounded, the
+        // scan could wake hundreds at once; the bridge pass has had a budget for
+        // exactly this reason. Collapse still completes, just over a few ticks.
+        const SUPPORT_WAKE_BUDGET = isMobileProfile ? 12 : 48;
+        let supportWoken = 0;
 
         // Build a spatial hash of all bricks so each support lookup only scans the
         // few bricks in the surrounding 3�3�3 cells instead of the whole castle.
@@ -19769,6 +24117,7 @@ function animate() {
         }
 
         for (const b of castleScanBricks) {
+            if (supportWoken >= SUPPORT_WAKE_BUDGET) break;
             if (b.isPlank || b.isRoof || b.isHutSupport) continue;
             if (b.body.sleepState === 0) continue;
             const by = b.body.position.y;
@@ -19792,8 +24141,23 @@ function animate() {
                     // physically-decoupled tower brick, or destroying the wall would topple
                     // the untouched tower.
                     if (other.body.mass > 0) {
-                        if (other.body.sleepState !== 2) continue;   // moving = not support
                         if (other.grp !== b.grp) continue;           // different structure
+                        // CASCADE FIX: "awake" is not the same as "gone". A brick
+                        // jostled by a nearby hit is still sitting in its slot and
+                        // still carrying load. Treating every awake brick as absent
+                        // meant one woken brick invalidated its neighbours' support,
+                        // the scan woke them, and the front unzipped through the
+                        // whole structure on every tick - which is what pinned the
+                        // frame rate after a single shot. Only a brick actually
+                        // DISPLACED from its build slot stops counting. Same rule
+                        // the lintel end-support check below already uses; a truly
+                        // falling brick clears the tolerance within a tick or two.
+                        if (other.body.sleepState !== 2) {
+                            const sdx = other.body.position.x - other.ix;
+                            const sdy = other.body.position.y - other.iy;
+                            const sdz = other.body.position.z - other.iz;
+                            if (sdx*sdx + sdy*sdy + sdz*sdz > SUPPORT_SLOT_TOL2) continue;
+                        }
                     }
                     const ox = other.body.position.x;
                     if (Math.abs(ox - bx) > CHECK_XZ) continue;
@@ -19803,7 +24167,7 @@ function animate() {
                     if (dy > CHECK_DY_LO && dy < CHECK_DY_HI) { supported = true; break; }
                 }
             }
-            if (!supported) b.body.wakeUp();
+            if (!supported) { b.body.wakeUp(); supportWoken++; }
         }
 
         // Lintel drop check: a static lintel beam is simply-supported on the
@@ -19820,30 +24184,45 @@ function animate() {
             const ez1 = L.spanAxis === 'z' ? lp.z - L.halfSpan : lp.z;
             const ex2 = L.spanAxis === 'x' ? lp.x + L.halfSpan : lp.x;
             const ez2 = L.spanAxis === 'z' ? lp.z + L.halfSpan : lp.z;
-            let end1 = false, end2 = false;
-            for (const o of castleScanBricks) {
-                if (o === L || o.isLintel) continue;
-                // A brick counts as an end support if it's still roughly where it
-                // was built � even if it's momentarily AWAKE (a nearby hit jitters
-                // it without knocking it out). The old check skipped all awake
-                // bricks, so a hit that merely woke the gate columns made the
-                // lintel think its supports were gone; it then dropped as a heavy
-                // dynamic beam and fell straight through those still-present
-                // bricks. Only a brick actually displaced from its build slot
-                // (knocked loose) should stop counting.
-                if (o.body.mass > 0) {
-                    const odx = o.body.position.x - o.ix;
-                    const ody = o.body.position.y - o.iy;
-                    const odz = o.body.position.z - o.iz;
-                    if (odx*odx + ody*ody + odz*odz > 0.35 * 0.35) continue; // displaced = no longer supporting
+            // PERF: this used to walk the ENTIRE brick list once per lintel -
+            // O(lintels x bricks) with no spatial pruning, inside the same
+            // throttled pass. Reuse the spatial hash built above and probe only
+            // the cells around each end point. Same acceptance rule as before.
+            const endSupported = (ex, ez) => {
+                const ccx  = Math.floor(ex / _GRID_CELL);
+                const ccz  = Math.floor(ez / _GRID_CELL);
+                const cyLo = Math.floor((lp.y - END_DY_HI) / _GRID_CELL) - 1;
+                const cyHi = Math.floor((lp.y - END_DY_LO) / _GRID_CELL) + 1;
+                for (let dcx = -1; dcx <= 1; dcx++)
+                for (let ccy = cyLo; ccy <= cyHi; ccy++)
+                for (let dcz = -1; dcz <= 1; dcz++) {
+                    const arr = _grid.get(_cellKeyXYZ(ccx + dcx, ccy, ccz + dcz));
+                    if (!arr) continue;
+                    for (let j = 0; j < arr.length; j++) {
+                        const o = castleScanBricks[arr[j]];
+                        if (o === L || o.isLintel) continue;
+                        // A brick counts as an end support if it's still roughly
+                        // where it was built � even if it's momentarily AWAKE (a
+                        // nearby hit jitters it without knocking it out). Only a
+                        // brick actually displaced from its build slot (knocked
+                        // loose) should stop counting.
+                        if (o.body.mass > 0) {
+                            const odx = o.body.position.x - o.ix;
+                            const ody = o.body.position.y - o.iy;
+                            const odz = o.body.position.z - o.iz;
+                            if (odx*odx + ody*ody + odz*odz > 0.35 * 0.35) continue;
+                        }
+                        const op = o.body.position;
+                        const dyl = lp.y - op.y;
+                        if (dyl < END_DY_LO || dyl > END_DY_HI) continue;
+                        if (Math.abs(op.x - ex) < END_XZ && Math.abs(op.z - ez) < END_XZ) return true;
+                    }
                 }
-                const op = o.body.position;
-                const dyl = lp.y - op.y;
-                if (dyl < END_DY_LO || dyl > END_DY_HI) continue;
-                if (!end1 && Math.abs(op.x - ex1) < END_XZ && Math.abs(op.z - ez1) < END_XZ) end1 = true;
-                if (!end2 && Math.abs(op.x - ex2) < END_XZ && Math.abs(op.z - ez2) < END_XZ) end2 = true;
-                if (end1 && end2) break;
-            }
+                return false;
+            };
+            // Short-circuit: if end1 is already missing the beam drops regardless.
+            const end1 = endSupported(ex1, ez1);
+            const end2 = end1 ? endSupported(ex2, ez2) : false;
             if (!end1 || !end2) {
                 L.body.type = CANNON.Body.DYNAMIC;
                 L.body.mass = 150;
@@ -19853,6 +24232,7 @@ function animate() {
                 L.scored  = false;   // now a real falling brick � eligible to score
             }
         }
+        if (_perfDebugEnabled) perfDebugMarkScan(performance.now() - _scanT0, castleScanBricks.length);
     }
 
     // Bridge-specific support scan. The castle scan is disabled while the
@@ -19864,6 +24244,7 @@ function animate() {
         && (_frameCount - _lastDisturbFrame < supportScanActiveWindow)
         && !_mobilePerfEmergency;
     if (shouldRunBridgeSupportScan) {
+        const _brScanT0 = _perfDebugEnabled ? performance.now() : 0;
         const bridgeBricks = getStoryRoleBricks('bridge');
         const GROUND_Y    = BS.h * 0.55;
         const CHECK_XZ    = BS.w * 0.75;
@@ -19910,6 +24291,7 @@ function animate() {
                 if (woken >= BUDGET) break;
             }
         }
+        if (_perfDebugEnabled) perfDebugMarkScan(performance.now() - _brScanT0, bridgeBricks.length);
     }
 
     // Cluster stability (cantilever / top-heavy collapse) check.
@@ -19930,7 +24312,9 @@ function animate() {
             ? (isMobileProfile ? 180 : 260)
             : (isMobileProfile ? 240 : 360));
     if (!mobileImpactBudgetMode && _frameCount > 180 && _frameCount % clusterScanInterval === 0 &&
-        _frameCount - _lastDisturbFrame < clusterScanActiveWindow && !bridgeStageActive) {
+        _frameCount - _lastDisturbFrame < clusterScanActiveWindow && !bridgeStageActive &&
+        castleScanIsActive) {
+        const _cluScanT0 = _perfDebugEnabled ? performance.now() : 0;
         const GROUND_Y = BS.h * 0.55;
         const ADJ_XZ   = BS.w * 1.15;   // connects same-row + stacked neighbours
         const ADJ_Y    = BS.h * 1.2;
@@ -20021,6 +24405,7 @@ function animate() {
                 }
             }
         }
+        if (_perfDebugEnabled) perfDebugMarkScan(performance.now() - _cluScanT0, castleScanBricks.length);
     }
 
     // Pre-step wake: sleeping bricks near an approaching cannonball must be
@@ -20208,15 +24593,15 @@ function animate() {
                     markNpcAngry(np.x, np.z, 0.55, 18);
                     break; // shoved, no kill
                 }
-                // Buckshot falls off HARD with range: full carnage inside ~8 m,
-                // fading to nothing by ~18 m — past that a pellet only staggers.
+                // Buckshot falls off hard with range: full carnage inside ~11 m,
+                // fading to nothing by ~24 m — past that a pellet only staggers.
                 let shotgunFalloff = 1;
                 if (cb.weaponType === WEAPON_IDX_SHOTGUN) {
                     const sdx = np.x - (cb.ox ?? np.x);
                     const sdy = ny - (cb.oy ?? ny);
                     const sdz = np.z - (cb.oz ?? np.z);
                     const shotDist = Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
-                    shotgunFalloff = THREE.MathUtils.clamp(1 - (shotDist - 8) / 10, 0, 1);
+                    shotgunFalloff = THREE.MathUtils.clamp(1 - (shotDist - 11) / 13, 0, 1);
                     if (shotgunFalloff <= 0) {
                         const bv = cb.body.velocity;
                         const horiz = Math.sqrt(bv.x * bv.x + bv.z * bv.z) || 1;
@@ -20246,24 +24631,37 @@ function animate() {
                         );
                     }
                 }
-                if (cb.weaponType === WEAPON_IDX_SHOTGUN && cb.body && npc.partBodies) {
-                    // Point-blank buckshot: comically excessive fling — double the
-                    // sniper's shove on the torso plus a kick to every limb so the
-                    // whole ragdoll cartwheels. Scaled by the range falloff.
+                if (cb.weaponType === WEAPON_IDX_SHOTGUN && cb.body && npc.ragdollParts && npc.ragdollParts.length) {
+                    // Point-blank buckshot: comically excessive fling. Impulse is
+                    // scaled by each part's own mass so every piece gains the SAME
+                    // velocity — otherwise the 4 kg shins leave at three times the
+                    // 20 kg torso's speed and the ragdoll shreds instead of
+                    // cartwheeling away as one lump. Scaled by the range falloff.
                     const sp = cb.body.velocity;
                     const ss = Math.sqrt(sp.x * sp.x + sp.y * sp.y + sp.z * sp.z) || 1;
-                    const f = 240 * shotgunFalloff;
-                    for (const pb of npc.partBodies) {
-                        if (!pb) continue;
+                    const dirX = sp.x / ss, dirZ = sp.z / ss;
+                    const limbDv  = SHOTGUN_FLING_LIMB_DV  * shotgunFalloff;
+                    const torsoDv = SHOTGUN_FLING_TORSO_DV * shotgunFalloff;
+                    // Lift the ragdoll speed clamp for a beat so they actually
+                    // clear the parapet instead of being trimmed back to 18 m/s
+                    // on the very next physics step.
+                    const flingUntil = performance.now() + SHOTGUN_FLING_MS;
+                    for (const rp of npc.ragdollParts) {
+                        const pb = rp && rp.body;
+                        if (!pb) continue;   // constraint-only entry
+                        pb._flingUntilMs = flingUntil;
+                        pb.wakeUp();
+                        const dv = (pb === npc.ragdollParts[0].body) ? torsoDv : limbDv;
+                        // Zero lever arm: a clean linear punch. The tumble comes
+                        // from the explicit spin below rather than from torque.
                         pb.applyImpulse(
-                            new CANNON.Vec3((sp.x / ss) * f * 0.35, 14 * shotgunFalloff, (sp.z / ss) * f * 0.35),
-                            pb.position
+                            new CANNON.Vec3(dirX * pb.mass * dv, pb.mass * dv * 0.46, dirZ * pb.mass * dv),
+                            new CANNON.Vec3(0, 0, 0)
                         );
-                    }
-                    if (npc.partBodies[0]) {
-                        npc.partBodies[0].applyImpulse(
-                            new CANNON.Vec3((sp.x / ss) * f, 44 * shotgunFalloff, (sp.z / ss) * f),
-                            npc.partBodies[0].position
+                        pb.angularVelocity.set(
+                            (Math.random() - 0.5) * 14 * shotgunFalloff,
+                            (Math.random() - 0.5) * 14 * shotgunFalloff,
+                            (Math.random() - 0.5) * 14 * shotgunFalloff
                         );
                     }
                 }
@@ -20837,7 +25235,11 @@ function animate() {
             const spd = NPC_WALK_SPEED * (npc.speedMul || 1) * (npc.crawlMode ? NPC_CRAWL_SPEED_SCALE : 1);
             const isMobileWalker = isMobileProfile;
             const doBrickAvoidance = !isMobileWalker || ((_frameCount + (npc.avoidPhase || 0)) % 3 === 0);
-            const doWalkCollision = !isMobileWalker || ((_frameCount + (npc.walkCollisionPhase || 0)) % 2 === 0);
+            // townEmerging: a sentry stepping out of its house is passing
+            // through the door frame. Skipping the solid push for those few
+            // steps stops it snagging on a jamb and jamming in the opening.
+            const doWalkCollision = (!isMobileWalker || ((_frameCount + (npc.walkCollisionPhase || 0)) % 2 === 0))
+                && !npc.townEmerging;
 
             // Dedicated bridge-lane solver: when lock is active, move straight
             // off the bridge first (center + forward) before any turning logic.
@@ -21069,29 +25471,47 @@ function animate() {
         const climbDy = targetY - np.y;
         if (climbDy > 0.001) {
             if (climbDy > NPC_MAX_STEP_UP) {
-                // Too steep: cancel this frame's horizontal motion and recover.
-                np.x = prevX;
-                np.z = prevZ;
-                targetY = npcGroundY(np.x, np.z);
-                if (np.y > targetY + 0.02) {
-                    npc.vy -= 14 * dt;
-                    np.y += npc.vy * dt;
-                    if (np.y <= targetY) { np.y = targetY; npc.vy = 0; }
-                } else {
-                    np.y = targetY;
+                // Too steep to mount in one step. Scrabble against it briefly,
+                // then commit to hauling up so nobody parks at a rubble face
+                // forever. The height field caps standable cells at
+                // NPC_MAX_RUBBLE_STAND_Y, so this can never scale a wall.
+                npc.clamberTimer = (npc.clamberTimer || 0) + dt;
+                if (npc.clamberTimer > NPC_CLAMBER_COMMIT_SEC) {
+                    np.y = Math.min(targetY, np.y + NPC_CLAMBER_RATE * dt);
                     npc.vy = 0;
+                } else {
+                    np.x = prevX;
+                    np.z = prevZ;
+                    targetY = npcGroundY(np.x, np.z);
+                    if (np.y > targetY + 0.02) {
+                        npc.vy -= 14 * dt;
+                        np.y += npc.vy * dt;
+                        if (np.y <= targetY) { np.y = targetY; npc.vy = 0; }
+                    } else {
+                        np.y = targetY;
+                        npc.vy = 0;
+                    }
+                    npc.stuckTimer = Math.max(npc.stuckTimer || 0, 0.12);
                 }
-                npc.stuckTimer = Math.max(npc.stuckTimer || 0, 0.12);
             } else {
+                // Mounting a course: rise slowly and give up most of this
+                // frame's ground speed so it reads as effort, not a hop.
+                npc.clamberTimer = 0;
                 const climbRate = NPC_CLIMB_RATE * (npc.isHutCharger ? 1.08 : 1.0);
                 np.y += Math.min(climbDy, climbRate * dt);
                 npc.vy = 0;
+                if (climbDy > 0.12) {
+                    np.x = prevX + (np.x - prevX) * NPC_CLIMB_ADVANCE;
+                    np.z = prevZ + (np.z - prevZ) * NPC_CLIMB_ADVANCE;
+                }
             }
         } else if (np.y > targetY + 0.02) {
+            npc.clamberTimer = 0;
             npc.vy -= 14 * dt;
             np.y += npc.vy * dt;
             if (np.y <= targetY) { np.y = targetY; npc.vy = 0; }
         } else {
+            npc.clamberTimer = 0;
             np.y = targetY;
             npc.vy = 0;
         }
@@ -21118,7 +25538,11 @@ function animate() {
         vmMortarGroup.visible  = false;
         vmMinigunGroup.visible = false;
         vmSniperGroup.visible  = false;
+        vmRifleGroup.visible   = false;
+        vmRifleHand.visible    = false;
         vmGrenadeGroup.visible = false;
+        vmKarateGroup.visible  = false;
+        vmMaeGeriGroup.visible = false;
     }
 
     // Grenade cook animation: two-segment floppy fuse burns down; spring
@@ -21234,6 +25658,8 @@ function animate() {
         }
     }
 
+    updateRifleViewmodel(dt);
+
     // Minigun barrel spin � rotate around Y (barrel long axis toward target)
     if (currentWeapon === WEAPON_IDX_MINIGUN) {
         const spinSpeed = minigunFiring ? 12 : Math.max(0, (vmMgBarrelSpin.userData.spinSpeed || 0) - dt * 6);
@@ -21293,6 +25719,16 @@ function animate() {
         }
     }
 
+    // Rifle auto-fire while the trigger is held. A reload in progress holds
+    // the trigger open; fireCannonball() starts one if the magazine runs dry.
+    if (rifleFiring && currentWeapon === WEAPON_IDX_RIFLE && !gameOver && !gamePaused && rifleReloadT === 0) {
+        const now = performance.now();
+        if (now >= rifleNextFire) {
+            rifleNextFire = now + RIFLE_RATE;
+            fireCannonball(parseFloat(document.getElementById('power').value));
+        }
+    }
+
     // Fixed timestep 1/60 s � cannon accumulates sub-steps so high-fps
     // screens don't run physics in slow motion.
     const physicsDt = slowMo ? dt * 0.25 : dt;
@@ -21300,6 +25736,13 @@ function animate() {
     // CCD prep: remember where each ball is BEFORE stepping so we can ray-check
     // the segment it travels this step (anti-tunnel for fast / far shots).
     for (const cb of cannonballs) {
+        // Rifle rounds fly flatter than world gravity allows: cancel the
+        // difference between the world's pull and the lighter one they are
+        // meant to feel. physicsDt (not dt) so slow-mo scales it the same way
+        // the solver scales real gravity.
+        if (cb.weaponType === WEAPON_IDX_RIFLE) {
+            cb.body.velocity.y += (-world.gravity.y - RIFLE_GRAVITY) * physicsDt;
+        }
         if (cb.body.userData && cb.body.userData.sniper) {
             // Integrate simple ballistic model for sniper rounds: gravity drop + drag.
             const v = cb.body.velocity;
@@ -21403,6 +25846,20 @@ function animate() {
     // Keep at least 2 substeps in mobile emergency. A single substep can
     // increase post-impact penetration/correction churn and trap low FPS.
     const physicsSubsteps = (isMobileProfile && _mobilePerfEmergency) ? 2 : 4;
+    // PERF: solver cost is iterations x contact equations. 20 iterations keeps a
+    // settled 12-high stack rock-steady, but during a large collapse - when the
+    // masonry is already tumbling and micro-jitter is invisible - it is the
+    // single biggest multiplier on step time. Scale back while the awake set is
+    // large and restore the full 20 as the structure settles.
+    // Thresholds measured against a real wall collapse: that peaked at ~164
+    // awake bricks / 284 contacts, so the original 200/500 gates never fired
+    // and the whole adaptive path was dead code. 120 puts a genuine collapse
+    // into the reduced-iteration band while leaving settled masonry at 20.
+    if (!_mobilePerfEmergency) {
+        world.solver.iterations = _lastAwakeBrickCount > 320 ? 10
+                                : _lastAwakeBrickCount > 120 ? 14
+                                : 20;
+    }
     const physicsStartAt = _perfDebugEnabled ? performance.now() : 0;
     world.step(1 / 60, physicsDt, physicsSubsteps);
     if (_perfDebugEnabled) perfDebugMarkPhysics(performance.now() - physicsStartAt);
@@ -21603,7 +26060,8 @@ function animate() {
             // cascade-wake the planks above � stops pellet fan-out from collapsing
             // the whole hut while still letting cannonball / blast flings cascade.
             const plankCascadeThresh = b.isPlank ? 2.0 : _WAKE_PROP_MOVE2;
-            if (_doPropFrame && s2 > plankCascadeThresh && !brickSubmerged) {
+            if (_doPropFrame && s2 > plankCascadeThresh && !brickSubmerged
+                && _awakeBrickPts.length < _WAKE_PROP_MAX_PTS) {
                 const p = b.body.position;
                 _awakeBrickPts.push(p.x, p.y, p.z, b.grp);
             }
@@ -21891,13 +26349,21 @@ function animate() {
         // cascade-wake the whole deck.
         const isBridgeActive = bridgeStageActive;
         const propBudget = isBridgeActive ? Math.min(6, wakePropBudget) : wakePropBudget;
+        // PERF: this pass is a cross product (sleeping bricks x moving bricks).
+        // propBudget only counts WAKES, so on a frame where few bricks qualify it
+        // walked the entire product without ever breaking out - the dominant cost
+        // during a big collapse. Bound the raw pair tests as well.
+        const PROP_PAIR_BUDGET = isMobileProfile ? 24000 : 120000;
+        const _ptsLen = _awakeBrickPts.length;
+        let pairTests = 0;
         let woken = 0;
         for (const b of frameActiveBricks) {
             if (b.body.sleepState === 0) continue;   // already awake
+            if (pairTests >= PROP_PAIR_BUDGET) break;
             const bp = b.body.position;
-            const wakeWaterY = getWaterSurfaceYAtXZ(bp.x, bp.z);
-            if (wakeWaterY != null && bp.y <= wakeWaterY + 0.45) continue;
-            for (let i = 0; i < _awakeBrickPts.length; i += 4) {
+            let undermined = false;
+            for (let i = 0; i < _ptsLen; i += 4) {
+                pairTests++;
                 // Only a brick from the SAME structure can be undermined by this
                 // moving brick — wall debris must not knock the decoupled towers down.
                 if (_awakeBrickPts[i + 3] !== b.grp) continue;
@@ -21911,10 +26377,18 @@ function animate() {
                 if (dx > RXZ || dx < -RXZ) continue;
                 const dz = bp.z - _awakeBrickPts[i + 2];
                 if (dz > RXZ || dz < -RXZ) continue;
-                b.body.wakeUp();
-                woken++;
+                undermined = true;
                 break;
             }
+            if (!undermined) continue;
+            // PERF: the water-surface lookup is several trig-heavy profile evals
+            // per call. It used to run for EVERY sleeping brick on every prop
+            // frame; now only for the few that actually matched a moving
+            // neighbour and are about to be woken.
+            const wakeWaterY = getWaterSurfaceYAtXZ(bp.x, bp.z);
+            if (wakeWaterY != null && bp.y <= wakeWaterY + 0.45) continue;
+            b.body.wakeUp();
+            woken++;
             if (woken >= propBudget) break;   // bound worst-case work
         }
     }
@@ -22175,17 +26649,21 @@ function animate() {
             if (p.body) {
                 const av = p.body.angularVelocity;
                 const av2 = av.x * av.x + av.y * av.y + av.z * av.z;
-                if (av2 > RAGDOLL_MAX_SPIN2) {
-                    const s = RAGDOLL_MAX_SPIN / Math.sqrt(av2);
+                const maxSpin  = (p.body._flingUntilMs > ragdollNowMs) ? RAGDOLL_MAX_SPIN * 1.9 : RAGDOLL_MAX_SPIN;
+                if (av2 > maxSpin * maxSpin) {
+                    const s = maxSpin / Math.sqrt(av2);
                     av.x *= s;
                     av.y *= s;
                     av.z *= s;
                 }
 
+                const flinging = p.body._flingUntilMs > ragdollNowMs;
+                const maxSpeed  = flinging ? RAGDOLL_FLING_MAX_SPEED  : RAGDOLL_MAX_SPEED;
+                const maxSpeed2 = flinging ? RAGDOLL_FLING_MAX_SPEED2 : RAGDOLL_MAX_SPEED2;
                 const vv = p.body.velocity;
                 const vv2 = vv.x * vv.x + vv.y * vv.y + vv.z * vv.z;
-                if (vv2 > RAGDOLL_MAX_SPEED2) {
-                    const s = RAGDOLL_MAX_SPEED / Math.sqrt(vv2);
+                if (vv2 > maxSpeed2) {
+                    const s = maxSpeed / Math.sqrt(vv2);
                     vv.x *= s;
                     vv.y *= s;
                     vv.z *= s;
@@ -22410,6 +26888,11 @@ function animate() {
     updateBallistaEncounter(dt);
     updateStoryProgression();
     updateKingsBunker(dt);
+    // Melee swing pose/impact, and the Modern Warfare AC-130 resupply run.
+    // updateMelee runs unconditionally so a FOV punch left over from a swing
+    // unwinds even if the player switched weapons mid-strike.
+    updateMelee(dt);
+    updateAirdropSystem(dt);
 
     for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
@@ -22447,7 +26930,7 @@ function animate() {
 
     const waterAnimStart = _perfDebugEnabled ? performance.now() : 0;
     if (WATER_SYSTEM_ENABLED && devWaterFxEnabled
-        && (levelWaterPlanes.length || bridgeLibraryWaterSurfaces.length)) {
+        && (levelWaterPlanes.length || bridgeLibraryWaterSurfaces.length || townPuddleWater)) {
         // Scroll water UVs (three counter-moving normal layers).
         const waterDt = dt * WATER_MOTION_RATE;
         const waterT = performance.now() * 0.001 * WATER_MOTION_RATE;
@@ -22498,6 +26981,17 @@ function animate() {
             const uniforms = wm.material?.uniforms;
             if (uniforms?.time) uniforms.time.value += dt * WATER_LIBRARY_WAVE_SPEED;
         }
+        // Town puddles are a separate surface: they must NOT join
+        // bridgeLibraryWaterSurfaces, or the bridge suppression passes would
+        // hide them the moment the town stage takes over the frame.
+        if (townPuddleWater?.visible) {
+            const pu = townPuddleWater.material?.uniforms;
+            if (pu?.time) pu.time.value += dt * WATER_LIBRARY_WAVE_SPEED;
+        }
+        // Advance the interactive ripple heightfield (no-op unless that mode is
+        // selected). Water2 drives its own clock; Reflector/Refractor have no
+        // time uniform, so the loops above simply skip them.
+        stepRippleSim(dt);
 
         updateLiveWaterSceneryReflection();
         updateWaterImpactRipples(dt);
@@ -22652,6 +27146,9 @@ function animate() {
     // FPV Drone: show/hide HUD overlay (rendering now handled in the main render block above)
     const showDroneFpv = !twoPlayerMode && !!activeDrone && !activeDrone.detonated;
     if (droneFpvOverlayEl) droneFpvOverlayEl.style.display = showDroneFpv ? 'block' : 'none';
+
+    // Feeds the adaptive solver-iteration scaling on the next frame's step.
+    _lastAwakeBrickCount = awakeBricksThisFrame;
 
     if (_perfDebugEnabled) {
         perfDebugMarkFrame(rawDt, awakeBricksThisFrame, shouldRunSupportScan);

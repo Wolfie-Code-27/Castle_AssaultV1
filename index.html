@@ -133,6 +133,20 @@
         #crosshair.w5 .ch-dot { width: 1px; height: 1px; left: 0; top: 0; }
         #crosshair.w5 .ch-t, #crosshair.w5 .ch-b { width: 1px; }
         #crosshair.w5 .ch-lf, #crosshair.w5 .ch-rt { height: 1px; }
+        /* Melee: a wide open reticle with no dot — you are aiming a body, not a
+           barrel, and the ring reads as the reach of the strike. The mae geri
+           reaches further with a narrower arc, so its ring is wider and its
+           ticks are shorter. */
+        #crosshair.w9 { --ch: #f4ead2; --gap: 13px; --len: 6px; }
+        #crosshair.w9 .ch-ring { opacity: 0.60; width: 46px; height: 46px; left: -23px; top: -23px; }
+        #crosshair.w9 .ch-dot { opacity: 0; }
+        #crosshair.w10 { --ch: #ffd9a8; --gap: 17px; --len: 5px; }
+        #crosshair.w10 .ch-ring { opacity: 0.50; width: 60px; height: 60px; left: -30px; top: -30px; }
+        #crosshair.w10 .ch-dot { opacity: 0; }
+        /* Assault rifle: a tight four-tick reticle with a faint ring, between
+           the minigun's spray and the sniper's single pixel. */
+        #crosshair.w11 { --ch: #e6ecf2; --gap: 5px; --len: 7px; }
+        #crosshair.w11 .ch-ring { opacity: 0.45; width: 26px; height: 26px; left: -13px; top: -13px; }
         #crosshair.hit { --ch: #6cff6c; }
         #crosshair.headshot { --ch: #ff8f62; }
 
@@ -932,9 +946,13 @@
             pointer-events: auto;
         }
         #settingsBtn:hover { background: rgba(255,255,255,0.12); }
+        /* Hidden by default. Settings → "Dev Menu Button" reveals it, and the JS
+           sets display:inline-flex to show it. Defaulting to none in CSS rather
+           than hiding it from script means there is no flash of the button
+           before main.js has evaluated. */
         #devMenuBtn {
             position: fixed; top: 13px; right: 148px; height: 36px;
-            display: inline-flex; align-items: center; box-sizing: border-box;
+            display: none; align-items: center; box-sizing: border-box;
             background: rgba(12,17,33,0.84); color: #d7e8ff;
             border: 1px solid rgba(166,204,255,0.34); border-radius: 8px;
             padding: 0 12px; font-size: 16px; cursor: pointer; z-index: 350;
@@ -1491,18 +1509,18 @@
 
             <div class="dmLevelWrap">
                 <div class="dmLevel">
-                    <button class="dmLevelBtn" data-level="town">🏘️ Town Level</button>
-                    <button class="dmLevelBtn active" data-level="bridge">🌉 Bridge Level</button>
+                    <button class="dmLevelBtn active" data-level="town">🏘️ Town Level</button>
+                    <button class="dmLevelBtn" data-level="bridge">🌉 Bridge Level</button>
                     <button class="dmLevelBtn" data-level="castle">🏰 Castle Level</button>
                 </div>
             </div>
-            <div class="dmLevelHint" id="dmLevelHint">Choose where Classic mode starts.</div>
+            <div class="dmLevelHint" id="dmLevelHint">Story campaign runs Town, then Bridge, then the Castle heist.</div>
 
             <div class="dmGrid" id="dmGrid"></div>
 
             <div class="dmFootNote">
                 <span class="key">W A S D</span> Move &nbsp; <span class="key">Mouse</span> Aim &nbsp;
-                <span class="key">Click / Space</span> Fire &nbsp; <span class="key">Q / E</span> Weapon &nbsp; <span class="key">E</span> Use &nbsp;
+                <span class="key">Click / Space</span> Fire &nbsp; <span class="key">Q / E</span> Weapon &nbsp; <span class="key">E</span> Use &nbsp; <span class="key">R</span> Reload &nbsp;
                 <span class="key">ESC</span> Pause
             </div>
 
@@ -1519,13 +1537,15 @@
             <span class="key">Click</span> Fire &nbsp;&nbsp;
             <span class="key">Space</span> Jump &nbsp;&nbsp;
             <span class="key">Q / E</span> Weapon &nbsp;&nbsp;<span class="key">E</span> Use &nbsp;&nbsp;
+            <span class="key">R</span> Reload &nbsp;&nbsp;
             <span class="key">+</span> / <span class="key">-</span> or <span class="key">Scroll</span> Power &nbsp;&nbsp;
-            <span class="key">ESC</span> Pause &nbsp;&nbsp;
+            <span class="key">ESC</span> Pause / Menu &nbsp;&nbsp;
             <span class="key">RMB Hold</span> Ball-cam
         </div>
         <div id="pauseActions">
             <button id="resumeBtn" class="pauseBtn">Resume</button>
             <button id="pauseRetryBtn" class="pauseBtn primary">Restart Level</button>
+            <button id="pauseMenuBtn" class="pauseBtn">Main Menu</button>
         </div>
     </div>
 
@@ -1581,7 +1601,6 @@
         <h3>⚙️ SETTINGS</h3>
         <div class="sRow"><label>🟤 Double Barrel</label><input type="number" id="setSg" min="0" max="40" value="12"></div>
         <div class="sRow"><label>? Cannonballs</label><input type="number" id="setCb" min="0" max="30" value="10"></div>
-        <div class="sRow"><label>🏰 Cannon Impact <span id="setCannonImpactVal">170</span></label><input type="range" id="setCannonImpact" min="1" max="500" value="170"></div>
         <div class="sRow"><label>💣 Explosive</label><input type="number" id="setEx" min="0" max="10" value="3"></div>
         <div class="sRow"><label>☄️ Mortar</label><input type="number" id="setMo" min="0" max="10" value="2"></div>
         <div class="sRow"><label>☄️ Minigun</label><input type="number" id="setMg" min="0" max="500" value="200"></div>
@@ -1594,8 +1613,10 @@
         <div class="sRow"><label>🚁 FPS Counter</label><input type="checkbox" id="setFpsCounter" style="width:auto;accent-color:#f1c40f"></div>
         <div class="sRow"><label>⚙️ Sound</label><input type="checkbox" id="setSound" checked style="width:auto;accent-color:#f1c40f"></div>
         <div class="sRow"><label>🧱 Rubble SFX</label><input type="checkbox" id="setRubbleSound" style="width:auto;accent-color:#f1c40f"></div>
+        <hr style="border-color:rgba(255,255,255,0.12);margin:10px 0">
+        <div class="sRow"><label>🧪 Dev Menu Button</label><input type="checkbox" id="setDevMenu" style="width:auto;accent-color:#8fc0ff"></div>
         <button id="applySettings">APPLY &amp; RESTART</button>
-        <p class="sNote" id="buildStamp">Build: 2026-06-20</p>
+        <p class="sNote" id="buildStamp">Build: 2026-08-17</p>
         <p class="sNote">Resets scores and reloads ammo</p>
     </div>
 
@@ -1609,9 +1630,11 @@
             <summary>🌊 Water Effects</summary>
             <div class="sRow"><label>? Mode</label>
                 <select id="setWaterMode" style="background:#0d1b2a;color:#e0e8ff;border:1px solid #2a3e5a;border-radius:4px;padding:2px 6px;font-size:12px;">
-                    <option value="0">🧱 Reflective (high quality)</option>
-                    <option value="1">🌊 Normal-mapped (balanced)</option>
-                    <option value="2">⚙️ Simple (performance)</option>
+                    <option value="0">🪞 Reflective — three.js Water</option>
+                    <option value="1" selected>💧 Interactive ripples (impact driven)</option>
+                    <option value="2">🔍 Refraction — see through</option>
+                    <option value="3">🌊 Flow map — Water2</option>
+                    <option value="4">🪟 Sharp mirror — Reflector</option>
                 </select>
             </div>
             <div class="sRow"><label>👥 Tint</label><input type="color" id="setWaterColor" value="#5a4932"></div>
@@ -1620,6 +1643,9 @@
             <div class="sRow"><label>🧱 Ripple Strength <span id="setWaterRippleStrengthVal">140%</span></label><input type="range" id="setWaterRippleStrength" min="50" max="300" value="140"></div>
             <div class="sRow"><label>🧱 Ripple Size <span id="setWaterRippleSizeVal">125%</span></label><input type="range" id="setWaterRippleSize" min="60" max="260" value="125"></div>
             <div class="sRow"><label>🧱 Ripple Lifetime <span id="setWaterRippleLifeVal">115%</span></label><input type="range" id="setWaterRippleLife" min="60" max="240" value="115"></div>
+            <div class="sRow"><label>💧 Wave Speed <span id="setRippleSpeedVal">1.20 m/s</span></label><input type="range" id="setRippleSpeed" min="40" max="400" value="120"></div>
+            <div class="sRow"><label>💧 Ripple Life <span id="setRippleLifeVal">3.0 s</span></label><input type="range" id="setRippleLife" min="10" max="80" value="30"></div>
+            <div class="sRow"><label>💧 Reach</label><span id="setRippleReachVal" style="opacity:0.75">~3.6 m</span></div>
         </details>
         <div class="sRow"><label>?🟤 Disarm NPCs</label><input type="checkbox" id="setDisarmNpc" style="width:auto;accent-color:#8fc0ff"></div>
         <div class="sRow"><label>🟤 Disable Guards (Test)</label><input type="checkbox" id="setDisableGuards" style="width:auto;accent-color:#8fc0ff"></div>
@@ -1653,6 +1679,9 @@
         <div class="wBtn" id="wBtn6">🎯 FPV Drone<span>Kamikaze</span><span id="ammo6" class="ammoCount">×1</span></div>
         <div class="wBtn" id="wBtn7">🧨 Grenade<span>Fused</span><span id="ammo7" class="ammoCount">×0</span></div>
         <div class="wBtn" id="wBtn8">💥 Cluster<span>Mid-air burst</span><span id="ammo8" class="ammoCount">×0</span></div>
+        <div class="wBtn" id="wBtn9">🥋 Karate Chop<span>Melee · downward</span><span id="ammo9" class="ammoCount">×0</span></div>
+        <div class="wBtn" id="wBtn10">🦵 Mae Geri<span>Melee · launcher</span><span id="ammo10" class="ammoCount">×0</span></div>
+        <div class="wBtn" id="wBtn11">🔫 Assault Rifle<span>Auto · R reloads</span><span id="ammo11" class="ammoCount">0 / 0</span></div>
     </div>
 
     <!-- P2 scoreboard -->
