@@ -821,3 +821,16 @@ menu cannot lock anyone out of re-enabling it.
   measurements come back CPU-bound it is worth revisiting.
 - Nothing in these sessions was verified by an automated test. Static checks and
   arithmetic simulations only, plus manual play testing.
+
+## Touch controls (2026-09-22)
+The hand-rolled move pad / look drag / mobile FIRE-DESC-USE pills are gone.
+`src/touch.js` builds the layer on the shared Arcade Touch Kit
+(`src/touchkit.js`, identical in every game - edit the master in
+`C:\Users\Dale\arcade-touch-kit`, run `node sync.mjs`). main.js supplies the
+verbs (`ensureTouchHud`) and reads the thumbs once a frame
+(`applyTouchFrame`, just before movement is summed). `isMobileProfile` now
+comes from the kit's detection, so a touchscreen laptop is a desktop unless
+`?touch=1`. Pause on touch is an explicit button (`pauseTouchGame`); tapping
+the overlay resumes. Probe for tests: `window._townProbe.touch()`. Test:
+`node C:\Users\Dale\arcade-touch-kit\tests\castle.test.mjs` with
+`npx vite --port 5173` running (20 checks).
