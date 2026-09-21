@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <link rel="icon" href="data:,">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover">
     <meta name="theme-color" content="#0a0b10">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -1460,6 +1460,38 @@
                 left: calc(env(safe-area-inset-left, 0px) + min(34vw, 220px) + 12px);
                 right: auto;
             }
+        }
+
+        /* === Shared touch kit (src/touchkit.js) ==================================
+           The sticks, FIRE, JUMP, the scope / drone / USE slot and the top-edge
+           system buttons are drawn by the kit. What follows retires the old
+           mobile buttons and tucks the weapon roller into the left column,
+           above where the walk stick rests. */
+        body.touch-ui #mobileFireWrap,
+        body.touch-ui #mobileBallCamBtn,
+        body.touch-ui #mobileFullscreenBtn,
+        body.touch-ui #fireButton { display: none !important; }
+        body.touch-ui #mobileWeaponHud {
+            left: max(8px, calc(env(safe-area-inset-left, 0px) + 6px));
+            right: auto;
+            top: auto;
+            bottom: calc(env(safe-area-inset-bottom, 0px) + 158px);
+            flex-direction: row;
+            gap: 0;
+        }
+        body.touch-ui #scoreboard {
+            top: calc(env(safe-area-inset-top, 0px) + 10px);
+            left: calc(env(safe-area-inset-left, 0px) + 160px);
+            right: auto;
+            transform: none;
+        }
+        body.touch-ui #interactPrompt { bottom: calc(env(safe-area-inset-bottom, 0px) + 150px); }
+        body.touch-ui #lockMsg h2 { font-size: 34px; }
+        body.touch-ui #lockMsg p { font-size: 16px; }
+        body.touch-ui #pauseMsg h2 { font-size: 34px; }
+        body.touch-ui #settingsBtn, body.touch-ui #dmSettingsBtn { display: none !important; }
+        @media (max-height: 460px) {
+            body.touch-ui #mobileWeaponHud { bottom: calc(env(safe-area-inset-bottom, 0px) + 172px); transform: scale(.84); transform-origin: bottom left; }
         }
     </style>
 </head>

@@ -40,15 +40,17 @@ if (typeof window !== 'undefined') {
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
 import { initEditor, activateEditor } from './editor.js';
+import { createTouchControls } from './touch.js';
+import { detectTouchDevice } from './touchkit.js';
 
 window.__GAME_BOOTED = true;
 window.dispatchEvent(new Event('game-booted'));
 
-const coarsePointerQuery = window.matchMedia ? window.matchMedia('(pointer: coarse)') : null;
-const hasTouchInput = ((navigator.maxTouchPoints || 0) > 0) || ('ontouchstart' in window);
-// Force-desktop override lets touchscreen PC users suppress mobile mode.
-const isMobileProfile = !window.__forceDesktopMode &&
-    (hasTouchInput || !!(coarsePointerQuery && coarsePointerQuery.matches));
+// The shared touch kit decides what counts as a phone or tablet (coarse primary
+// pointer, no hover, iPadOS masquerading as a Mac; ?touch=1 / ?touch=0 to force).
+// A touchscreen laptop no longer gets the mobile profile just for having a
+// screen you can poke. Force-desktop override lets anyone suppress it anyway.
+const isMobileProfile = !window.__forceDesktopMode && detectTouchDevice().touch;
 
 // === Renderer ===
 let renderer;
@@ -1448,158 +1450,113 @@ function activateTouchProfileIfNeeded() {
         applyInputUiMode();
     }
     applyTouchRuntimeUi();
+    ensureTouchHud();
+    if (touchUi) touchUi.kit.setEnabled(true);
 }
 
 function hasPrimaryPlayerInputCapture() {
     return pointerLocked || touchControls.active;
 }
 
-function updateTouchStick() {
-    if (!touchControls.stick) return;
-    touchControls.stick.style.transform = `translate(calc(-50% + ${(touchControls.moveRight * 30).toFixed(1)}px), calc(-50% + ${(-touchControls.moveForward * 30).toFixed(1)}px))`;
-}
-
-function isTouchInMovePad(clientX, clientY) {
-    const pad = touchControls.pad;
-    if (!pad) return false;
-    const r = pad.getBoundingClientRect();
-    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
-}
-
+// === Touch layer ===========================================================
+// Sticks, buttons and gestures come from src/touch.js (on the shared Arcade
+// Touch Kit). main.js only supplies the verbs; the thumbs are read once a
+// frame in animate() through applyTouchFrame().
+let touchUi = null;
+const TOUCH_LOOK_SENS = 0.0034;   // radians per screen pixel of thumb travel
 function ensureTouchHud() {
-    if (!touchControls.enabled || touchControls.hud) return;
-    const compactHud = window.innerWidth <= 430 || window.innerHeight <= 760;
-    const padSize = compactHud ? 116 : 130;
-    const stickSize = compactHud ? 46 : 52;
-    const hud = document.createElement('div');
-    hud.id = 'touchHud';
-    hud.style.position = 'fixed';
-    hud.style.inset = '0';
-    hud.style.pointerEvents = 'none';
-    hud.style.zIndex = '120';
-
-    const pad = document.createElement('div');
-    pad.style.position = 'absolute';
-    pad.style.left = compactHud ? '14px' : '24px';
-    pad.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 14px)';
-    pad.style.width = `${padSize}px`;
-    pad.style.height = `${padSize}px`;
-    pad.style.borderRadius = '50%';
-    pad.style.border = '2px solid rgba(255,255,255,0.32)';
-    pad.style.background = 'radial-gradient(circle at 35% 35%, rgba(255,255,255,0.24), rgba(0,0,0,0.22))';
-    pad.style.boxShadow = '0 12px 28px rgba(0,0,0,0.45)';
-
-    const stick = document.createElement('div');
-    stick.style.position = 'absolute';
-    stick.style.left = '50%';
-    stick.style.top = '50%';
-    stick.style.width = `${stickSize}px`;
-    stick.style.height = `${stickSize}px`;
-    stick.style.borderRadius = '50%';
-    stick.style.border = '2px solid rgba(255,255,255,0.42)';
-    stick.style.background = 'radial-gradient(circle at 30% 30%, rgba(241,196,15,0.75), rgba(130,90,8,0.76))';
-    stick.style.transform = 'translate(-50%, -50%)';
-    pad.appendChild(stick);
-
-    const aimHint = document.createElement('div');
-    aimHint.textContent = 'Right side: drag to aim, use FIRE button';
-    aimHint.style.position = 'absolute';
-    aimHint.style.right = compactHud ? '12px' : '18px';
-    aimHint.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 8px)';
-    aimHint.style.padding = '6px 10px';
-    aimHint.style.borderRadius = '999px';
-    aimHint.style.background = 'rgba(0,0,0,0.45)';
-    aimHint.style.border = '1px solid rgba(255,255,255,0.18)';
-    aimHint.style.color = '#e7ecff';
-    aimHint.style.fontSize = '11px';
-    aimHint.style.letterSpacing = '0.03em';
-    if (compactHud) aimHint.style.display = 'none';
-
-    const sniperAimBtn = document.createElement('button');
-    sniperAimBtn.id = 'mobileSniperAimBtn';
-    sniperAimBtn.type = 'button';
-    sniperAimBtn.textContent = 'AIM';
-    sniperAimBtn.setAttribute('aria-pressed', 'false');
-    sniperAimBtn.style.position = 'absolute';
-    sniperAimBtn.style.left = compactHud ? '138px' : '164px';
-    sniperAimBtn.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 40px)';
-    sniperAimBtn.style.width = compactHud ? '62px' : '70px';
-    sniperAimBtn.style.height = compactHud ? '62px' : '70px';
-    sniperAimBtn.style.borderRadius = '50%';
-    sniperAimBtn.style.border = '2px solid rgba(225, 238, 255, 0.6)';
-    sniperAimBtn.style.background = 'radial-gradient(circle at 30% 30%, rgba(45, 64, 96, 0.95), rgba(17, 27, 46, 0.95))';
-    sniperAimBtn.style.color = '#d9ecff';
-    sniperAimBtn.style.fontWeight = '800';
-    sniperAimBtn.style.fontSize = compactHud ? '12px' : '13px';
-    sniperAimBtn.style.letterSpacing = '0.08em';
-    sniperAimBtn.style.pointerEvents = 'auto';
-    sniperAimBtn.style.touchAction = 'none';
-    sniperAimBtn.style.display = 'none';
-    sniperAimBtn.style.boxShadow = '0 10px 24px rgba(0,0,0,0.45)';
-
-    const setSniperAimButtonHeld = held => {
-        touchControls.sniperAimHeld = held;
-        sniperAimBtn.classList.toggle('active', held);
-        sniperAimBtn.style.borderColor = held ? 'rgba(143, 212, 255, 0.95)' : 'rgba(225, 238, 255, 0.6)';
-        sniperAimBtn.style.boxShadow = held
-            ? '0 0 0 2px rgba(116, 208, 255, 0.5), 0 12px 28px rgba(0,0,0,0.5)'
-            : '0 10px 24px rgba(0,0,0,0.45)';
-        sniperAimBtn.setAttribute('aria-pressed', held ? 'true' : 'false');
-        if (currentWeapon === WEAPON_IDX_SNIPER && hasPrimaryPlayerInputCapture()) {
-            sniperAiming = held || touchControls.lookTouchId != null;
-        }
-    };
-
-    const aimStart = e => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!touchControls.enabled || twoPlayerMode || currentWeapon !== WEAPON_IDX_SNIPER || !hasPrimaryPlayerInputCapture()) return;
-        setSniperAimButtonHeld(true);
-    };
-    const aimEnd = e => {
-        e.preventDefault();
-        e.stopPropagation();
-        setSniperAimButtonHeld(false);
-    };
-
-    sniperAimBtn.addEventListener('touchstart', aimStart, { passive: false });
-    sniperAimBtn.addEventListener('touchend', aimEnd, { passive: false });
-    sniperAimBtn.addEventListener('touchcancel', aimEnd, { passive: false });
-    sniperAimBtn.addEventListener('mousedown', aimStart);
-    sniperAimBtn.addEventListener('mouseup', aimEnd);
-    sniperAimBtn.addEventListener('mouseleave', aimEnd);
-
-    hud.appendChild(pad);
-    hud.appendChild(aimHint);
-    hud.appendChild(sniperAimBtn);
-    document.body.appendChild(hud);
-
-    touchControls.hud = hud;
-    touchControls.pad = pad;
-    touchControls.stick = stick;
-    touchControls.sniperAimBtn = sniperAimBtn;
-    updateTouchStick();
-    updateMobileSniperAimButton();
+    if (touchUi || !touchControls.enabled) return;
+    touchUi = createTouchControls(renderer.domElement, {
+        // A tap on the bare screen while paused resumes, like a click did.
+        idleTap() { if (gamePaused && _gameStarted && !gameOver && !hasPrimaryPlayerInputCapture()) beginTouchControls(); },
+        fireDown() {
+            if (!hasPrimaryPlayerInputCapture() || twoPlayerMode || window.__editorActive) return;
+            if (activeDrone) { droneAscend = true; return; }
+            if (currentWeapon === WEAPON_IDX_MINIGUN) { minigunFiring = true; minigunNextFire = 0; return; }
+            if (currentWeapon === WEAPON_IDX_RIFLE) { rifleFiring = true; rifleNextFire = 0; return; }
+            if ((currentWeapon === WEAPON_IDX_GRENADE || currentWeapon === WEAPON_IDX_CLUSTER)
+                    && !gameOver && !gamePaused && p1Ammo[currentWeapon] > 0) {
+                grenadeCooking = true;
+                grenadeCookStart = performance.now();
+                vmGrenadeGroup.visible = true;
+                return;
+            }
+            p1Fire();
+        },
+        fireUp(cancelled) {
+            minigunFiring = false; rifleFiring = false; droneAscend = false;
+            if (!grenadeCooking) return;
+            grenadeCooking = false;
+            vmGrenadeGroup.visible = false;
+            _vmGrenFuseMat.emissiveIntensity = 0;
+            // A touch that was taken away (a call, the app backgrounded) drops
+            // the grenade rather than throwing it blind.
+            if (!gameOver && !gamePaused && !cancelled && hasPrimaryPlayerInputCapture()) {
+                const cookMs = Math.min(performance.now() - grenadeCookStart, GRENADE_FUSE_MS - 200);
+                fireCannonballCooked(cookMs);
+            }
+        },
+        jump() { if (hasPrimaryPlayerInputCapture() && !activeDrone && !twoPlayerMode) jumpQueued = true; },
+        setScope(on) {
+            touchControls.sniperAimHeld = on;
+            if (currentWeapon === WEAPON_IDX_SNIPER && hasPrimaryPlayerInputCapture()) sniperAiming = on;
+        },
+        descend(on) { droneDescend = on; },
+        interact() { if (hasPrimaryPlayerInputCapture()) tryInteract(); },
+        pinBallCam(on) { mobileBallCamPinned = on; if (!on) ballCamActive = false; updateMobileBallCamButton(); },
+        pause() { pauseTouchGame(); },
+        openSettings() { pauseTouchGame(); touchUi.openSettings(); },
+    });
+}
+// The thumbs, read once a frame. Movement lands in touchControls.moveRight /
+// moveForward (the same fields WASD is summed with); aim is applied here.
+function applyTouchFrame(dt) {
+    if (!touchUi) return;
+    const playing = touchControls.active && _gameStarted && !gameOver && !gamePaused && !twoPlayerMode;
+    const look = touchUi.frame(dt, {
+        playing,
+        sniper: currentWeapon === WEAPON_IDX_SNIPER,
+        drone: !!activeDrone,
+        canUse: !!(interactPromptEl && interactPromptEl.style.display === 'block'),
+        cooking: grenadeCooking,
+        cook: grenadeCooking ? Math.min(1, (performance.now() - grenadeCookStart) / (GRENADE_FUSE_MS - 200)) : 0,
+        ammoOut: !activeDrone && p1Ammo[currentWeapon] === 0,
+        fireLabel: activeDrone ? 'Up' : (currentWeapon === WEAPON_IDX_GRENADE || currentWeapon === WEAPON_IDX_CLUSTER) ? 'Cook' : meleeProfileFor(currentWeapon) ? 'Strike' : 'Fire',
+    });
+    if (!playing) { touchControls.moveRight = 0; touchControls.moveForward = 0; return; }
+    touchControls.moveRight = touchUi.move.x;
+    touchControls.moveForward = touchUi.move.y;
+    if (!look || (!look.dx && !look.dy)) return;
+    const dx = look.dx * getAimSensitivityScale();
+    const dy = look.dy * getAimSensitivityScale();
+    if (activeDrone) {
+        droneYaw -= dx * TOUCH_LOOK_SENS * DRONE_MOUSE_YAW;
+        droneCamPitch = Math.max(-1.0, Math.min(0.9, droneCamPitch - dy * TOUCH_LOOK_SENS * DRONE_MOUSE_PITCH));
+    } else {
+        yaw -= dx * TOUCH_LOOK_SENS;
+        pitch = clampAimPitch(pitch - dy * TOUCH_LOOK_SENS);
+    }
+}
+// Touch has no pointer lock to lose, so pausing is an explicit button.
+function pauseTouchGame() {
+    if (!_gameStarted || gameOver || !touchControls.active) return;
+    touchControls.active = false;
+    resetTouchInputs();
+    setTouchHudVisible(false);
+    setPaused(true);
+    document.getElementById('lockMsg').style.display = 'flex';
+    const lockMsgP = document.querySelector('#lockMsg p');
+    if (lockMsgP) lockMsgP.textContent = 'Tap anywhere to resume';
+    if (pauseActionsEl) pauseActionsEl.style.display = _hasPlayed ? 'flex' : 'none';
 }
 
 function updateMobileSniperAimButton() {
-    const btn = touchControls.sniperAimBtn;
-    if (!btn) return;
-    const visible = !!(touchControls.enabled && touchControls.active && !twoPlayerMode && currentWeapon === WEAPON_IDX_SNIPER);
-    btn.style.display = visible ? 'block' : 'none';
-    if (!visible) {
-        touchControls.sniperAimHeld = false;
-        btn.classList.remove('active');
-        btn.style.borderColor = 'rgba(225, 238, 255, 0.6)';
-        btn.style.boxShadow = '0 10px 24px rgba(0,0,0,0.45)';
-        btn.setAttribute('aria-pressed', 'false');
-    }
+    if (!touchUi) return;
+    if (currentWeapon !== WEAPON_IDX_SNIPER || !touchControls.active) { touchControls.sniperAimHeld = false; touchUi.resetScope(); }
 }
 
 function setTouchHudVisible(visible) {
-    if (touchControls.hud) {
-        touchControls.hud.style.display = visible ? 'block' : 'none';
-    }
+    if (touchUi) touchUi.kit.setActive(!!visible);
     if (!visible) touchControls.sniperAimHeld = false;
     updateMobileSniperAimButton();
 }
@@ -1617,22 +1574,21 @@ function beginTouchControls() {
 }
 
 function resetTouchInputs() {
-    touchControls.moveTouchId = null;
-    touchControls.lookTouchId = null;
     touchControls.moveRight = 0;
     touchControls.moveForward = 0;
-    touchControls.lookMoved = false;
     minigunFiring = false;
+    rifleFiring = false;
+    droneAscend = false;
+    droneDescend = false;
     sniperAiming = false;
     sniperHoldBreath = false;
     touchControls.sniperAimHeld = false;
-    if (touchControls.sniperAimBtn) {
-        touchControls.sniperAimBtn.classList.remove('active');
-        touchControls.sniperAimBtn.style.borderColor = 'rgba(225, 238, 255, 0.6)';
-        touchControls.sniperAimBtn.style.boxShadow = '0 10px 24px rgba(0,0,0,0.45)';
-        touchControls.sniperAimBtn.setAttribute('aria-pressed', 'false');
+    if (grenadeCooking) {
+        grenadeCooking = false;
+        vmGrenadeGroup.visible = false;
+        _vmGrenFuseMat.emissiveIntensity = 0;
     }
-    updateTouchStick();
+    if (touchUi) { touchUi.kit.releaseAll(); touchUi.resetScope(); }
 }
 
 const MOVE_SPEED = 8.0;  // m/s
@@ -1939,6 +1895,7 @@ function updateMobileBallCamButton() {
     mobileBallCamBtn.style.display = visible ? 'block' : 'none';
     if (!visible) mobileBallCamPinned = false;
     mobileBallCamBtn.classList.toggle('active', mobileBallCamPinned);
+    if (touchUi) touchUi.setCam(mobileBallCamPinned);
     mobileBallCamBtn.textContent = mobileBallCamPinned ? 'Unpin Ball Cam' : 'Pin Ball Cam';
     mobileBallCamBtn.setAttribute('aria-pressed', mobileBallCamPinned ? 'true' : 'false');
 }
@@ -2111,7 +2068,7 @@ if (goMenuBtn)  goMenuBtn.addEventListener('click',  () => returnToMenu());
 // Canvas click while locked -> fire (P1 only, non-minigun weapons)
 renderer.domElement.addEventListener("click", e => {
     if (e.button !== 0) return;  // left-click only - RMB is ball-cam
-    if (!pointerLocked) return;  // touch mode fires only via dedicated mobile fire button
+    if (!pointerLocked) return;  // touch mode fires only via the FIRE button (touch.js)
     if (window.__editorActive) return;  // editor edit mode: clicks place bricks, never fire (Play clears the flag)
     // Grenade/cluster throw is handled on mouseup � suppress the resulting click
     if (_grenadeThrowConsumeClick) { _grenadeThrowConsumeClick = false; return; }
@@ -2166,213 +2123,6 @@ renderer.domElement.addEventListener('mouseup', e => {
     }
     if (e.button === 2) { droneDescend = false; }
 });
-
-if (window.PointerEvent || (navigator.maxTouchPoints || 0) > 0 || ('ontouchstart' in window)) {
-    const compactTouch = window.innerWidth <= 430 || window.innerHeight <= 760;
-    const TOUCH_MOVE_RADIUS = compactTouch ? 52 : 58;
-    const TOUCH_LOOK_SENS = compactTouch ? 0.0032 : 0.00355;
-    const TOUCH_TAP_MOVE_PX = 8;
-    const touchInputTarget = window;
-    const isUiTouchTarget = target => {
-        if (!(target instanceof Element)) return false;
-        return !!target.closest('#weaponBar, #controls, #mobileWeaponHud, #mobileWeaponRoller, #mobileFireBtn, #mobileInteractBtn, #mobileBallCamBtn, #mobileFullscreenBtn, #settingsPanel, #settingsBtn, #twoPlayerBtn, #difficultyModal, #lockMsg, #pauseActions, #gameOver, button, input, label, .dmCard, .dmModeBtn, .pauseBtn, .goBtn');
-    };
-    const isUiTouchPoint = (x, y) => isUiTouchTarget(document.elementFromPoint(x, y));
-
-    touchInputTarget.addEventListener('touchstart', e => {
-        if (!_gameStarted) return;
-        if (twoPlayerMode) return;
-        if (gamePaused && _gameStarted && !hasPrimaryPlayerInputCapture()) beginTouchControls();
-
-        let consumed = false;
-        for (const t of e.changedTouches) {
-            if (isUiTouchPoint(t.clientX, t.clientY)) continue;
-            const touchOnMovePad = isTouchInMovePad(t.clientX, t.clientY);
-            if (touchOnMovePad) {
-                if (touchControls.moveTouchId == null) {
-                    touchControls.moveTouchId = t.identifier;
-                    touchControls.moveStartX = t.clientX;
-                    touchControls.moveStartY = t.clientY;
-                    touchControls.moveRight = 0;
-                    touchControls.moveForward = 0;
-                    updateTouchStick();
-                    consumed = true;
-                }
-                continue;
-            }
-
-            if (touchControls.lookTouchId == null) {
-                touchControls.lookTouchId = t.identifier;
-                touchControls.lookLastX = t.clientX;
-                touchControls.lookLastY = t.clientY;
-                touchControls.lookMoved = false;
-                touchControls.lookStartAt = performance.now();
-                consumed = true;
-            }
-        }
-        if (consumed) e.preventDefault();
-    }, { passive: false });
-
-    touchInputTarget.addEventListener('touchmove', e => {
-        if (!_gameStarted) return;
-        let consumed = false;
-        for (const t of e.changedTouches) {
-            if (t.identifier === touchControls.moveTouchId) {
-                const dx = t.clientX - touchControls.moveStartX;
-                const dy = t.clientY - touchControls.moveStartY;
-                const len = Math.hypot(dx, dy) || 1;
-                const clamped = Math.min(len, TOUCH_MOVE_RADIUS);
-                const nx = (dx / len) * (clamped / TOUCH_MOVE_RADIUS);
-                const ny = (dy / len) * (clamped / TOUCH_MOVE_RADIUS);
-                touchControls.moveRight = nx;
-                touchControls.moveForward = -ny;
-                updateTouchStick();
-                consumed = true;
-                continue;
-            }
-            if (t.identifier === touchControls.lookTouchId) {
-                const dx = (t.clientX - touchControls.lookLastX) * getAimSensitivityScale();
-                const dy = (t.clientY - touchControls.lookLastY) * getAimSensitivityScale();
-                if (activeDrone && !twoPlayerMode) {
-                    droneYaw -= dx * TOUCH_LOOK_SENS * DRONE_MOUSE_YAW;
-                    droneCamPitch += invertMouse ? (dy * TOUCH_LOOK_SENS * DRONE_MOUSE_PITCH) : (-dy * TOUCH_LOOK_SENS * DRONE_MOUSE_PITCH);
-                    droneCamPitch = Math.max(-1.0, Math.min(0.9, droneCamPitch));
-                } else {
-                    yaw -= dx * TOUCH_LOOK_SENS;
-                    pitch += invertMouse ? (dy * TOUCH_LOOK_SENS) : (-dy * TOUCH_LOOK_SENS);
-                    pitch = clampAimPitch(pitch);
-                }
-                if (Math.abs(t.clientX - touchControls.lookLastX) > TOUCH_TAP_MOVE_PX ||
-                    Math.abs(t.clientY - touchControls.lookLastY) > TOUCH_TAP_MOVE_PX) {
-                    touchControls.lookMoved = true;
-                }
-                touchControls.lookLastX = t.clientX;
-                touchControls.lookLastY = t.clientY;
-                consumed = true;
-            }
-        }
-        if (consumed) e.preventDefault();
-    }, { passive: false });
-
-    const endTouchHandler = e => {
-        if (!_gameStarted) return;
-        let consumed = false;
-        for (const t of e.changedTouches) {
-            if (t.identifier === touchControls.moveTouchId) {
-                touchControls.moveTouchId = null;
-                touchControls.moveRight = 0;
-                touchControls.moveForward = 0;
-                updateTouchStick();
-                consumed = true;
-                continue;
-            }
-            if (t.identifier === touchControls.lookTouchId) {
-                if (currentWeapon === WEAPON_IDX_SNIPER) sniperAiming = !!touchControls.sniperAimHeld;
-                touchControls.lookTouchId = null;
-                touchControls.lookMoved = false;
-                consumed = true;
-            }
-        }
-        if (consumed) e.preventDefault();
-    };
-
-    touchInputTarget.addEventListener('touchend', endTouchHandler, { passive: false });
-    touchInputTarget.addEventListener('touchcancel', endTouchHandler, { passive: false });
-
-    // Pointer-event fallback for mobile browsers that do not reliably emit touch events.
-    touchInputTarget.addEventListener('pointerdown', e => {
-        if (e.pointerType !== 'touch') return;
-        if (!_gameStarted) return;
-        if (twoPlayerMode) return;
-        activateTouchProfileIfNeeded();
-        if (gamePaused && _gameStarted && !hasPrimaryPlayerInputCapture()) beginTouchControls();
-        if (isUiTouchPoint(e.clientX, e.clientY)) return;
-
-        const pid = `p${e.pointerId}`;
-        const pointerOnMovePad = isTouchInMovePad(e.clientX, e.clientY);
-        if (pointerOnMovePad) {
-            if (touchControls.moveTouchId == null) {
-                touchControls.moveTouchId = pid;
-                touchControls.moveStartX = e.clientX;
-                touchControls.moveStartY = e.clientY;
-                touchControls.moveRight = 0;
-                touchControls.moveForward = 0;
-                updateTouchStick();
-            }
-            e.preventDefault();
-            return;
-        }
-
-        if (touchControls.lookTouchId == null) {
-            touchControls.lookTouchId = pid;
-            touchControls.lookLastX = e.clientX;
-            touchControls.lookLastY = e.clientY;
-            touchControls.lookMoved = false;
-            touchControls.lookStartAt = performance.now();
-            e.preventDefault();
-        }
-    }, { passive: false });
-
-    touchInputTarget.addEventListener('pointermove', e => {
-        if (e.pointerType !== 'touch') return;
-        const pid = `p${e.pointerId}`;
-        if (pid === touchControls.moveTouchId) {
-            const dx = e.clientX - touchControls.moveStartX;
-            const dy = e.clientY - touchControls.moveStartY;
-            const len = Math.hypot(dx, dy) || 1;
-            const clamped = Math.min(len, TOUCH_MOVE_RADIUS);
-            const nx = (dx / len) * (clamped / TOUCH_MOVE_RADIUS);
-            const ny = (dy / len) * (clamped / TOUCH_MOVE_RADIUS);
-            touchControls.moveRight = nx;
-            touchControls.moveForward = -ny;
-            updateTouchStick();
-            e.preventDefault();
-            return;
-        }
-        if (pid === touchControls.lookTouchId) {
-            const dx = (e.clientX - touchControls.lookLastX) * getAimSensitivityScale();
-            const dy = (e.clientY - touchControls.lookLastY) * getAimSensitivityScale();
-            if (activeDrone && !twoPlayerMode) {
-                droneYaw -= dx * TOUCH_LOOK_SENS * DRONE_MOUSE_YAW;
-                droneCamPitch += invertMouse ? (dy * TOUCH_LOOK_SENS * DRONE_MOUSE_PITCH) : (-dy * TOUCH_LOOK_SENS * DRONE_MOUSE_PITCH);
-                droneCamPitch = Math.max(-1.0, Math.min(0.9, droneCamPitch));
-            } else {
-                yaw -= dx * TOUCH_LOOK_SENS;
-                pitch += invertMouse ? (dy * TOUCH_LOOK_SENS) : (-dy * TOUCH_LOOK_SENS);
-                pitch = clampAimPitch(pitch);
-            }
-            if (Math.abs(e.clientX - touchControls.lookLastX) > TOUCH_TAP_MOVE_PX ||
-                Math.abs(e.clientY - touchControls.lookLastY) > TOUCH_TAP_MOVE_PX) {
-                touchControls.lookMoved = true;
-            }
-            touchControls.lookLastX = e.clientX;
-            touchControls.lookLastY = e.clientY;
-            e.preventDefault();
-        }
-    }, { passive: false });
-
-    const endPointerHandler = e => {
-        if (e.pointerType !== 'touch') return;
-        const pid = `p${e.pointerId}`;
-        if (pid === touchControls.moveTouchId) {
-            touchControls.moveTouchId = null;
-            touchControls.moveRight = 0;
-            touchControls.moveForward = 0;
-            updateTouchStick();
-            e.preventDefault();
-            return;
-        }
-        if (pid === touchControls.lookTouchId) {
-            if (currentWeapon === WEAPON_IDX_SNIPER) sniperAiming = !!touchControls.sniperAimHeld;
-            touchControls.lookTouchId = null;
-            touchControls.lookMoved = false;
-            e.preventDefault();
-        }
-    };
-
-    touchInputTarget.addEventListener('pointerup', endPointerHandler, { passive: false });
-    touchInputTarget.addEventListener('pointercancel', endPointerHandler, { passive: false });
-}
 
 document.querySelectorAll('.wBtn').forEach((btn, idx) => {
     btn.addEventListener('click', e => {
@@ -8880,6 +8630,17 @@ function _probeWaterMeshes() {
     return out;
 }
 
+// Touch-layer probe for the automated phone tests (arcade-touch-kit/tests).
+window._townProbe.touch = () => ({
+    enabled: touchControls.enabled, active: touchControls.active, kit: !!touchUi,
+    kitActive: !!(touchUi && touchUi.kit.active),
+    moveRight: touchControls.moveRight, moveForward: touchControls.moveForward,
+    yaw, pitch, weapon: currentWeapon, paused: gamePaused, started: _gameStarted, over: gameOver,
+    cooking: grenadeCooking, ammo: p1Ammo.slice(), shots: shotsFired, jumpQueued, sniperAiming, minigunFiring,
+    cam: [camera.position.x, camera.position.y, camera.position.z],
+});
+window._townProbe.touchUi = () => touchUi;
+window._townProbe.setWeapon = (i) => setWeapon(i);
 window._townProbe.renderInfo = () => {
     const gl = renderer.getContext();
     const size = renderer.getSize(new THREE.Vector2());
@@ -19611,55 +19372,6 @@ function attachRollerSwipeControl(targetEl) {
 
 attachRollerSwipeControl(mobileWeaponRollerEl);
 attachRollerSwipeControl(mwGripWheelEl);
-if (mobileFireBtn) {
-    const fireStart = e => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (activeDrone) {
-            droneAscend = true;   // fire button = ascend while piloting
-            return;
-        }
-        if (currentWeapon === WEAPON_IDX_MINIGUN) {
-            minigunFiring = true;
-            minigunNextFire = 0;
-        } else if (currentWeapon === WEAPON_IDX_RIFLE) {
-            rifleFiring = true;
-            rifleNextFire = 0;
-        } else {
-            p1Fire();
-        }
-    };
-    const fireEnd = e => {
-        e.preventDefault();
-        e.stopPropagation();
-        minigunFiring = false;
-        rifleFiring = false;
-        droneAscend = false;   // release ascend on touch end
-    };
-    mobileFireBtn.addEventListener('touchstart', fireStart, { passive: false });
-    mobileFireBtn.addEventListener('touchend', fireEnd, { passive: false });
-    mobileFireBtn.addEventListener('touchcancel', fireEnd, { passive: false });
-    mobileFireBtn.addEventListener('mousedown', fireStart);
-    mobileFireBtn.addEventListener('mouseup', fireEnd);
-    mobileFireBtn.addEventListener('mouseleave', fireEnd);
-}
-const mobileDescendBtn = document.getElementById('mobileDescendBtn');
-if (mobileInteractBtn) {
-    mobileInteractBtn.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        tryInteract();
-    }, { passive: false });
-}
-if (mobileDescendBtn) {
-    const descStart = e => { e.preventDefault(); e.stopPropagation(); droneDescend = true; };
-    const descEnd   = e => { e.preventDefault(); e.stopPropagation(); droneDescend = false; };
-    mobileDescendBtn.addEventListener('touchstart',  descStart, { passive: false });
-    mobileDescendBtn.addEventListener('touchend',    descEnd,   { passive: false });
-    mobileDescendBtn.addEventListener('touchcancel', descEnd,   { passive: false });
-    mobileDescendBtn.addEventListener('mousedown',   descStart);
-    mobileDescendBtn.addEventListener('mouseup',     descEnd);
-    mobileDescendBtn.addEventListener('mouseleave',  descEnd);
-}
 if (mobileBallCamBtn) {
     const toggleMobileBallCam = e => {
         e.preventDefault();
@@ -23924,6 +23636,7 @@ function animate() {
     // WASD + touch joystick movement along the horizontal plane (ignore pitch).
     // Keys are captured by drone controls while piloting � player stands still.
     // Scripted ladder climbs drive the camera themselves (input suspended).
+    applyTouchFrame(dt);
     const bunkerScripted = bunkerState.phase === 'descending' || bunkerState.phase === 'ascending';
     const moveForwardInput = (activeDrone || bunkerScripted) ? 0 : ((keys.w ? 1 : 0) - (keys.s ? 1 : 0) + touchControls.moveForward);
     const moveRightInput   = (activeDrone || bunkerScripted) ? 0 : ((keys.d ? 1 : 0) - (keys.a ? 1 : 0) + touchControls.moveRight);
