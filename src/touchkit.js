@@ -17,7 +17,7 @@
 // tall landscape phone. The layer multiplies by an automatic scale (bigger on
 // tablets) and the player's own size preference.
 
-export const TOUCHKIT_VERSION = '1.1.0';
+export const TOUCHKIT_VERSION = '1.1.1';
 
 const STORE_KEY = 'arcadeTouch.v1';      // shared by every game on the same origin
 const FORCE_KEY = 'arcadeTouch.force';   // 'touch' | 'desktop'
@@ -100,14 +100,33 @@ export function detectTouchDevice() {
 // fires, which is why it never showed there. fn(w, h) runs at once on every
 // resize / rotate / viewport event and again at 120, 400, 900 and 1600 ms if
 // the numbers have changed since.
+//
+// iOS Chrome has a second failure on top of that: after a rotation it can lay
+// the whole DOCUMENT out into the previous orientation's safe rectangle (a
+// grey band down one side and along the bottom, the page shifted into the
+// corner). Nothing inside the page can move that rectangle, but giving html
+// and body explicit pixel sizes and forcing a relayout does snap it back.
 export function watchViewport(fn) {
   let last = '';
   let timers = [];
+  const fit = (w, h) => {
+    const de = document.documentElement.style, bs = document.body.style;
+    de.width = bs.width = w + 'px';
+    de.height = bs.height = h + 'px';
+    de.margin = bs.margin = '0';
+    de.overflow = bs.overflow = 'hidden';
+    // read-back forces the layout; toggling a transform makes WebKit rebuild
+    // the fixed-position viewport it was holding on to
+    de.transform = 'translateZ(0)';
+    void document.documentElement.offsetHeight;
+    de.transform = '';
+  };
   const fire = (force) => {
     const w = window.innerWidth, h = window.innerHeight;
     const key = w + 'x' + h;
     if (!force && key === last) return;
     last = key;
+    fit(w, h);
     try { window.scrollTo(0, 0); } catch { /* nothing to do */ }
     fn(w, h);
   };
@@ -784,15 +803,12 @@ export function createTouchKit(opts = {}) {
     const st = document.documentElement.style;
     st.overscrollBehavior = 'none';
     st.touchAction = 'manipulation';
-    st.height = '100%';
+    // The games place their own HUD inside the safe area element by element;
+    // a padding on the root only makes the document taller than the screen,
+    // and a document taller than the screen is one iOS Chrome can scroll into
+    // a grey band.
+    st.padding = '0';
     document.body.style.overscrollBehavior = 'none';
-    // A rotation on iOS Chrome can leave the page scrolled by the height of
-    // its toolbar, which shows as a grey band. A body that cannot scroll at
-    // all has nowhere to go.
-    document.body.style.position = 'fixed';
-    document.body.style.inset = '0';
-    document.body.style.width = '100%';
-    document.body.style.height = '100%';
     document.body.style.overflow = 'hidden';
     document.addEventListener('gesturestart', (e) => { if (enabled) e.preventDefault(); }, { passive: false });
     document.addEventListener('contextmenu', (e) => {
