@@ -41,7 +41,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import * as CANNON from "cannon-es";
 import { initEditor, activateEditor } from './editor.js';
 import { createTouchControls } from './touch.js';
-import { detectTouchDevice } from './touchkit.js';
+import { detectTouchDevice, watchViewport } from './touchkit.js';
 
 window.__GAME_BOOTED = true;
 window.dispatchEvent(new Event('game-booted'));
@@ -1507,6 +1507,7 @@ function ensureTouchHud() {
         pause() { pauseTouchGame(); },
         openSettings() { pauseTouchGame(); touchUi.openSettings(); },
     });
+    touchUi.setCam(mobileBallCamPinned);
 }
 // The thumbs, read once a frame. Movement lands in touchControls.moveRight /
 // moveForward (the same fields WASD is summed with); aim is applied here.
@@ -1839,7 +1840,7 @@ const GAME_OVER_CALM_HOLD_SEC = 0.45;
 let ballCamActive = false;
 let ballCamAuto = true;    // auto ball-cam on by default on both desktop and mobile
 const _insetHiddenMeshes = [];  // scratch: meshes hidden for the ball-cam inset pass
-let mobileBallCamPinned = false;
+let mobileBallCamPinned = isMobileProfile;   // on by default on a phone: the CRT inset is half the fun
 let lastFiredBall = null;  // { mesh, body } of the most recently fired cannonball
 const ballCamera = new THREE.PerspectiveCamera(80, 16 / 9, 0.05, 300);
 ballCamera.rotation.order = 'YXZ';
@@ -14930,6 +14931,8 @@ let storyModeEnabled = false;
 let storyCampaignActive = false;
 let storyStage = 0;                 // 0 = off, 1 = bridge, 2 = castle, 3 = cleared
 let storyHudEl = null;
+let _storyHudTimer = 0;
+let _storyHudLast = '';
 let bridgeStageCompletePendingAdvance = false;
 let bridgeStageClearPendingAt = 0;
 let bridgeStageClearCalmSince = 0;
@@ -14971,6 +14974,18 @@ function setStoryHud(text) {
     const el = ensureStoryHud();
     if (!text) {
         el.style.display = 'none';
+        _storyHudLast = '';
+        return;
+    }
+    // On a phone the banner is a toast: it appears when the objective changes
+    // and gets out of the way four seconds later. Screen is the scarce thing.
+    if (touchControls.enabled) {
+        if (text === _storyHudLast) return;
+        _storyHudLast = text;
+        el.textContent = text;
+        el.style.display = 'block';
+        clearTimeout(_storyHudTimer);
+        _storyHudTimer = setTimeout(() => { el.style.display = 'none'; }, 4000);
         return;
     }
     el.textContent = text;
@@ -20585,17 +20600,19 @@ window.addEventListener("wheel", e => {
     adjustPower(e.deltaY < 0 ? +5 : -5);
 }, { passive: false });
 
-window.addEventListener("resize", () => {
+// Re-measured a few times after a rotation: iOS Chrome reports the old size
+// for a beat, which left a grey band beside the canvas until the next resize.
+watchViewport((w, h) => {
     if (twoPlayerMode) {
-        const asp = 0.5 * window.innerWidth / window.innerHeight;
+        const asp = 0.5 * w / h;
         camera.aspect  = asp;
         camera2.aspect = asp;
     } else {
-        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.aspect = w / h;
     }
     camera.updateProjectionMatrix();
     camera2.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(w, h);
 });
 
 // === Animation Loop ===
@@ -21169,7 +21186,7 @@ function perfDebugMarkFrame(rawDt, awakeBricks, supportScanRan) {
 }
 
 // Optional on-screen FPS counter (toggle via Settings).
-var fpsCounterEnabled = true;
+var fpsCounterEnabled = !isMobileProfile || /perfdebug=1/.test(location.search);   // a phone has no room for it
 var _fpsBadge = null;
 var _fpsAccum = 0;
 var _fpsFrames = 0;

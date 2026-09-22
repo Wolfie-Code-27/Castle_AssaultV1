@@ -1479,11 +1479,23 @@
             flex-direction: row;
             gap: 0;
         }
+        /* One small chip top-left, the way Nuts Mutts does it: score and
+           enemies on a line, nothing else. The old ball-cam pill lived here. */
         body.touch-ui #scoreboard {
-            top: calc(env(safe-area-inset-top, 0px) + 10px);
-            left: calc(env(safe-area-inset-left, 0px) + 160px);
+            top: calc(env(safe-area-inset-top, 0px) + 8px);
+            left: calc(env(safe-area-inset-left, 0px) + 8px);
             right: auto;
             transform: none;
+            display: flex; align-items: baseline; gap: 10px;
+            padding: 4px 9px; min-width: 0; border-radius: 8px;
+            background: rgba(0,0,0,0.5);
+        }
+        body.touch-ui #scoreboard .score-main { font-size: 13px; }
+        body.touch-ui #scoreboard .score-enemies { font-size: 12px; }
+        body.touch-ui #storyHud {
+            top: calc(env(safe-area-inset-top, 0px) + 8px) !important;
+            font-size: 11px !important; padding: 5px 11px !important;
+            max-width: 52vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         body.touch-ui #interactPrompt { bottom: calc(env(safe-area-inset-bottom, 0px) + 150px); }
         body.touch-ui #lockMsg h2 { font-size: 34px; }

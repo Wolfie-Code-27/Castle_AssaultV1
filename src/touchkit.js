@@ -17,7 +17,7 @@
 // tall landscape phone. The layer multiplies by an automatic scale (bigger on
 // tablets) and the player's own size preference.
 
-export const TOUCHKIT_VERSION = '1.0.0';
+export const TOUCHKIT_VERSION = '1.1.0';
 
 const STORE_KEY = 'arcadeTouch.v1';      // shared by every game on the same origin
 const FORCE_KEY = 'arcadeTouch.force';   // 'touch' | 'desktop'
@@ -90,6 +90,37 @@ export function detectTouchDevice() {
     ? forced
     : (info.primaryCoarse || info.uaMobile || info.iPadOS || (maxTouch > 0 && info.noHover));
   return info;
+}
+
+// Sizes a game's canvas from the viewport - and keeps doing so for a moment
+// after a rotation. Chrome on iOS (and some Android WebViews) fire `resize`
+// while innerWidth / innerHeight still describe the OLD orientation as the
+// toolbar animates; a canvas sized from that first reading is the wrong shape
+// and the page background shows through as a border. Safari settles before it
+// fires, which is why it never showed there. fn(w, h) runs at once on every
+// resize / rotate / viewport event and again at 120, 400, 900 and 1600 ms if
+// the numbers have changed since.
+export function watchViewport(fn) {
+  let last = '';
+  let timers = [];
+  const fire = (force) => {
+    const w = window.innerWidth, h = window.innerHeight;
+    const key = w + 'x' + h;
+    if (!force && key === last) return;
+    last = key;
+    try { window.scrollTo(0, 0); } catch { /* nothing to do */ }
+    fn(w, h);
+  };
+  const kick = () => {
+    for (const t of timers) clearTimeout(t);
+    fire(true);
+    timers = [120, 400, 900, 1600].map((ms) => setTimeout(() => fire(false), ms));
+  };
+  window.addEventListener('resize', kick);
+  window.addEventListener('orientationchange', kick);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', kick);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) kick(); });
+  return { refresh: kick };
 }
 
 export function forceInputMode(mode) {
@@ -753,7 +784,16 @@ export function createTouchKit(opts = {}) {
     const st = document.documentElement.style;
     st.overscrollBehavior = 'none';
     st.touchAction = 'manipulation';
+    st.height = '100%';
     document.body.style.overscrollBehavior = 'none';
+    // A rotation on iOS Chrome can leave the page scrolled by the height of
+    // its toolbar, which shows as a grey band. A body that cannot scroll at
+    // all has nowhere to go.
+    document.body.style.position = 'fixed';
+    document.body.style.inset = '0';
+    document.body.style.width = '100%';
+    document.body.style.height = '100%';
+    document.body.style.overflow = 'hidden';
     document.addEventListener('gesturestart', (e) => { if (enabled) e.preventDefault(); }, { passive: false });
     document.addEventListener('contextmenu', (e) => {
       if (enabled && performance.now() - lastTouchAt < 1200) e.preventDefault();
